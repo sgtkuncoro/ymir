@@ -157,6 +157,7 @@ File: `~/.config/ymir/config` (plain shell, sourced by ymir).
 |-----|---------|---------|
 | `HUB_HOST` | `macminim4` | Hub MagicDNS name or Tailscale IP. |
 | `HUB_USER` | *(empty)* | **Required.** Local macOS username on the hub. |
+| `IS_HUB` | `0` | Set to `1` on the hub itself: `add`/`rm`/`list` edit the local manifest, `sync` is a no-op. |
 | `TRANSPORT` | `ssh` | `ssh` for real use; `local` for tests (needs `HUB_ROOT`). |
 | `HUB_ROOT` | *(empty)* | Test only: a directory that stands in for the hub's `$HOME`. |
 | `MIRROR` | `0` | `1` adds `rsync --delete`: files removed on the hub are deleted locally. Destructive. |
@@ -213,6 +214,33 @@ Overview, or detailed help for one command.
 ---
 
 ## 8. Typical workflows
+
+### Defining which folders on the hub get distributed
+
+A managed path is just an entry in the hub manifest whose content lives at that
+HOME-relative location **on the hub** (`macminim4`). You define one in either place:
+
+**On the hub itself (recommended for curating).** Set `IS_HUB="1"` in
+`~/.config/ymir/config` on `macminim4`, then add real folders/files that live there.
+In hub mode ymir edits the local manifest directly (no SSH, no seeding) and `sync`
+is a no-op because the hub is the source:
+```sh
+# on macminim4
+ymir init
+$EDITOR ~/.config/ymir/config       # set IS_HUB="1"
+ymir add ~/.config/nvim ~/Documents/dotfiles ~/.zshrc
+ymir list
+ymir status                         # role: HUB (macminim4) - source of truth
+```
+Then on each spoke: `ymir sync` pulls those exact paths down.
+
+**From a spoke.** `ymir add ~/path` registers the path in the hub manifest over SSH.
+If the folder exists only on the hub, it is just registered (spokes pull it). If it
+exists locally but not yet on the hub, its current content is seeded up once, after
+which the hub owns it.
+
+Either way the manifest is shared, so the folder is "defined" once and every spoke
+receives it. Remove one with `ymir rm ~/path`.
 
 ### First-time setup (hub is `macminim4`, you are on a laptop)
 ```sh

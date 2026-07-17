@@ -55,6 +55,7 @@ shared. Other spokes pick up the change on their next `sync`.
 |-----|---------|
 | `HUB_HOST` | hub MagicDNS name (default `macminim4`) |
 | `HUB_USER` | **required** local macOS username on the hub |
+| `IS_HUB` | set `1` on the hub to curate paths there (`sync` becomes a no-op) |
 | `TRANSPORT` | `ssh` (real) or `local` (testing) |
 | `MIRROR` | `1` => `rsync --delete` (removes local files gone on hub); default `0` |
 | `INTERVAL` | launchd sync interval in seconds |

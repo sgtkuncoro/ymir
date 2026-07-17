@@ -25,6 +25,7 @@ HUB_HOST="macminim4"
 HUB_USER=""              # REQUIRED: local macOS username on the hub
 TRANSPORT="ssh"         # ssh | local
 HUB_ROOT=""             # only for TRANSPORT=local: path acting as hub $HOME
+IS_HUB="0"              # 1 => THIS machine is the hub (curate here; sync is a no-op)
 MIRROR="0"              # 1 => rsync --delete (destructive on the receiver)
 INTERVAL="300"          # launchd StartInterval seconds
 HUB_RSYNC_PATH=""       # optional --rsync-path for the hub (e.g. /opt/homebrew/bin/rsync)
@@ -46,6 +47,9 @@ log()  { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >>"$LOG_FILE"; }
 load_cfg() {
   mkdir -p "$CFG_DIR"
   [ -f "$CFG_FILE" ] && . "$CFG_FILE"
+  if [ "$IS_HUB" = "1" ]; then       # hub mode: operate on this machine's own home
+    TRANSPORT="local"; HUB_ROOT="$HOME"; return
+  fi
   [ "$TRANSPORT" = "local" ] && { [ -n "$HUB_ROOT" ] || die "TRANSPORT=local requires HUB_ROOT"; return; }
   [ -n "$HUB_USER" ] || die "HUB_USER not set. Edit $CFG_FILE (see 'ymir init')."
 }
@@ -109,6 +113,7 @@ cmd_init() {
 # ymir config ($(hostname))
 HUB_HOST="macminim4"     # hub MagicDNS name (Tailscale)
 HUB_USER=""              # REQUIRED: run 'id -un' on the hub and paste it here
+IS_HUB="0"               # set to 1 ON THE HUB (macminim4) to curate paths there directly
 TRANSPORT="ssh"          # ssh | local
 MIRROR="0"               # 1 => delete files on this machine that are gone on the hub
 INTERVAL="300"           # launchd sync interval (seconds)
@@ -165,6 +170,9 @@ cmd_list() {
 
 cmd_sync() {
   build_excludes
+  if [ "$IS_HUB" = "1" ]; then
+    echo "This machine is the hub (source of truth). Nothing to pull."; return 0
+  fi
   local rb rel n=0 fail=0 delflag=() ; rb="$(rsync_bin)"
   [ "$MIRROR" = "1" ] && delflag=(--delete)
   local rpath=(); [ -n "$HUB_RSYNC_PATH" ] && rpath=(--rsync-path="$HUB_RSYNC_PATH")
@@ -195,8 +203,12 @@ cmd_sync() {
 }
 
 cmd_status() {
-  printf 'hub:       %s@%s (transport=%s)\n' "${HUB_USER:-?}" "$HUB_HOST" "$TRANSPORT"
-  if hub_exec "echo ok" >/dev/null 2>&1; then echo "reachable: yes"; else echo "reachable: NO"; fi
+  if [ "$IS_HUB" = "1" ]; then
+    printf 'role:      HUB (%s) - source of truth\n' "$HUB_HOST"
+  else
+    printf 'role:      spoke -> hub %s@%s (transport=%s)\n' "${HUB_USER:-?}" "$HUB_HOST" "$TRANSPORT"
+    if hub_exec "echo ok" >/dev/null 2>&1; then echo "reachable: yes"; else echo "reachable: NO"; fi
+  fi
   local c; c="$(read_manifest 2>/dev/null | grep -c . || true)"
   printf 'managed:   %s path(s)\n' "${c:-0}"
   [ -f "$STATE_FILE" ] && printf 'last sync: %s\n' "$(cat "$STATE_FILE")" || echo "last sync: never"
