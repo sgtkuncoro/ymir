@@ -157,7 +157,7 @@ Every command also has `ymir <command> --help`.
 
 ### Spoke
 - `ymir catalog` (alias `hub-ls`) - show what the hub shares.
-- `ymir add [--to DEST] SHARE...` - subscribe; `--to` sets local placement.
+- `ymir add [--from SHARE] [--to DEST] SHARE...` - subscribe; `--from` names the hub source, `--to` the local placement. Positional SHARE also works.
 - `ymir add --all` - subscribe to everything shared (same paths).
 - `ymir rm SHARE...` - unsubscribe (matches the SHARE field only).
 - `ymir list` - show subscriptions (`SHARE -> DEST`).
@@ -183,7 +183,7 @@ On each spoke:
 ymir setup                          # choose SPOKE, enter hub username
 ymir catalog
 ymir add ~/.config/nvim
-ymir add --to ~/.gitconfig work.gitconfig
+ymir add --from work.gitconfig --to ~/.gitconfig
 ymir sync
 ymir install-agent
 ```
@@ -191,9 +191,9 @@ ymir install-agent
 ### Per-machine destinations (the reason for `--to`)
 ```sh
 # work-laptop wants the work gitconfig at ~/.gitconfig:
-ymir add --to ~/.gitconfig work.gitconfig
+ymir add --from work.gitconfig --to ~/.gitconfig
 # home-laptop wants a different source at the same local path:
-ymir add --to ~/.gitconfig personal.gitconfig
+ymir add --from personal.gitconfig --to ~/.gitconfig
 ```
 Each spoke decided its own placement; the hub only had to `share` both files.
 

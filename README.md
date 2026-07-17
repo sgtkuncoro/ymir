@@ -43,8 +43,9 @@ ymir unshare ~/.zshrc
 ### On each spoke (decide what you pull and where)
 ```sh
 ymir catalog                                  # see what the hub offers
-ymir add ~/.config/nvim                       # subscribe, same path
-ymir add --to ~/.gitconfig work.gitconfig     # subscribe + place at a different path
+ymir add ~/.config/nvim                                # subscribe, same path
+ymir add --from work.gitconfig --to ~/.gitconfig       # explicit: hub source -> local dest
+ymir add --to ~/.gitconfig work.gitconfig              # same thing, positional shorthand
 ymir add --all                                # subscribe to everything shared
 ymir list                                     # your subscriptions (SHARE -> DEST)
 ymir sync                                      # pull them down

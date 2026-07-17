@@ -297,14 +297,15 @@ cmd_shares() {
 
 # --- commands: spoke role (subscribe) -----------------------------------
 cmd_subscribe() {
-  local to="" all=0
+  local to="" from="" all=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --to)  to="${2:-}"; shift 2 ;;
-      --all) all=1; shift ;;
-      --)    shift; break ;;
-      -*)    die "unknown flag: $1" ;;
-      *)     break ;;
+      --to)   to="${2:-}"; shift 2 ;;
+      --from) from="${2:-}"; shift 2 ;;
+      --all)  all=1; shift ;;
+      --)     shift; break ;;
+      -*)     die "unknown flag: $1" ;;
+      *)      break ;;
     esac
   done
   mkdir -p "$CFG_DIR"; touch "$SUBS_FILE"
@@ -319,9 +320,14 @@ cmd_subscribe() {
     done <<< "$cat"
     return 0
   fi
-  [ $# -ge 1 ] || die "usage: ymir add [--to DEST] <share>...   |   ymir add --all"
+  # source(s): --from SHARE (single) OR positional shares
+  if [ -n "$from" ]; then
+    [ $# -eq 0 ] || die "do not mix --from with positional shares"
+    set -- "$from"
+  fi
+  [ $# -ge 1 ] || die "usage: ymir add [--from SHARE] [--to DEST] <share>...  |  ymir add --all"
   if [ -n "$to" ]; then
-    [ $# -eq 1 ] || die "--to takes exactly one share"
+    [ $# -eq 1 ] || die "--to takes exactly one share (use: --from SHARE --to DEST)"
     local src dest line
     src="$(to_rel "$1")"; dest="$(to_rel "$to")"
     dest_ok "$dest" || die "unsafe destination (escapes home): $to"
@@ -496,7 +502,7 @@ HUB (source of truth - decides what is offered)
 
 SPOKE (decides what it pulls and where)
   catalog                  show what the hub shares (alias: hub-ls)
-  add [--to DEST] SHARE..  subscribe to shared item(s); --to sets local placement
+  add [--from SHARE] [--to DEST] SHARE..  subscribe; --from source, --to placement
   add --all                subscribe to everything shared (same paths)
   rm SHARE..               unsubscribe
   list                     show this spoke's subscriptions (SHARE -> DEST)
@@ -559,21 +565,22 @@ ymir catalog   (run on a SPOKE)
 EOF
 ;;
     add|subscribe) cat <<'EOF'
-ymir add [--to DEST] SHARE...      (SPOKE: subscribe)
-ymir add --all                     subscribe to everything shared (same paths)
-ymir share ... (on the HUB)        (add is role-aware; on the hub it shares)
+ymir add [--from SHARE] [--to DEST] SHARE...   (SPOKE: subscribe)
+ymir add --all                                 subscribe to everything shared (same paths)
+ymir share ... (on the HUB)                    (add is role-aware; on the hub it shares)
 
   On a SPOKE, `add` records a subscription in this machine's local list
   (~/.config/ymir/paths.list). Each subscription is `SHARE -> DEST`:
-    - SHARE = a path the hub shares (see `ymir catalog`)
+    - SHARE = a path the hub shares (see `ymir catalog`); give it positionally or with --from
     - DEST  = where it should land on THIS machine (--to); defaults to SHARE
   DEST is validated to stay inside your home. Managing subscriptions is local (no hub
   round trip) except catalog lookups.
 
-  Examples:
-    ymir add --to ~/.gitconfig work.gitconfig   # hub work.gitconfig -> my ~/.gitconfig
-    ymir add .config/nvim                        # same path
-    ymir add --all                               # take everything the hub shares
+  Examples (these two are equivalent):
+    ymir add --from work.gitconfig --to ~/.gitconfig   # explicit, clearest
+    ymir add --to ~/.gitconfig work.gitconfig          # positional shorthand
+    ymir add .config/nvim                               # same path
+    ymir add --all                                      # take everything the hub shares
 EOF
 ;;
     rm|remove|unsubscribe) cat <<'EOF'
