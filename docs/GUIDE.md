@@ -66,7 +66,7 @@ flowchart LR
   `SHARE`.
 
 ### Where `--to` is remembered
-`ymir add --to ~/.gitconfig work.gitconfig` on a spoke normalizes both paths to
+`ymir sub --from work.gitconfig --to ~/.gitconfig` on a spoke normalizes both paths to
 HOME-relative and writes ONE line to the spoke's own list:
 ```
 work.gitconfig -> .gitconfig
@@ -150,25 +150,26 @@ Every command also has `ymir <command> --help`.
 - `ymir setup` - guided interactive setup (recommended).
 - `ymir init` - write the config template.
 
-### Hub (source of truth)
-- `ymir share [--force] PATH...` - add path(s) to the catalog.
-- `ymir unshare PATH...` - remove from the catalog.
-- `ymir shares` - print the catalog.
+### Hub (source of truth - publish)
+- `ymir pub [--force] PATH...` - publish path(s) to the catalog. (alias: `share`)
+- `ymir unpub PATH...` - remove from the catalog. (alias: `unshare`)
+- `ymir pubs` - print the catalog. (aliases: `shares`, `catalog`, `hub-ls`)
 
-### Spoke
-- `ymir catalog` (alias `hub-ls`) - show what the hub shares.
-- `ymir add [--from SHARE] [--to DEST] SHARE...` - subscribe; `--from` names the hub source, `--to` the local placement. Positional SHARE also works.
-- `ymir add --all` - subscribe to everything shared (same paths).
-- `ymir rm SHARE...` - unsubscribe (matches the SHARE field only).
-- `ymir list` - show subscriptions (`SHARE -> DEST`).
+### Spoke (subscribe)
+- `ymir pubs` - show what the hub publishes.
+- `ymir sub [--from SHARE] [--to DEST] SHARE...` - subscribe; `--from` names the hub source, `--to` the local placement. Positional SHARE also works. (alias: `add`)
+- `ymir sub --all` - subscribe to everything published (same paths).
+- `ymir unsub SHARE...` - unsubscribe (matches the SHARE field only). (alias: `rm`)
+- `ymir subs` - show subscriptions (`SHARE -> DEST`). (alias: `list`)
 - `ymir sync` - pull subscribed items to their chosen destinations.
-- `ymir publish [--as SHARE] LOCALPATH` - push a local path to the hub and share it.
+- `ymir push [--as SHARE] LOCALPATH` - push a local path to the hub and publish it. (alias: `publish`)
 
 ### Common
 - `ymir status` - role, reachability, counts, last sync.
 - `ymir install-agent` / `uninstall-agent` - launchd auto-sync.
 
-`add`/`rm`/`list` are role-aware (hub: catalog; spoke: subscriptions).
+`add`/`rm`/`list` are role-aware shorthands (hub: pub/unpub/pubs; spoke: sub/unsub/subs).
+`pub`/`unpub` only run on the hub; `sub`/`unsub`/`subs`/`push` only on a spoke.
 
 ## 8. Workflows
 
@@ -176,14 +177,14 @@ Every command also has `ymir <command> --help`.
 On the hub:
 ```sh
 ymir setup                          # choose HUB
-ymir share ~/.zshrc ~/.config/nvim ~/work.gitconfig
+ymir pub ~/.zshrc ~/.config/nvim ~/work.gitconfig
 ```
 On each spoke:
 ```sh
 ymir setup                          # choose SPOKE, enter hub username
-ymir catalog
-ymir add ~/.config/nvim
-ymir add --from work.gitconfig --to ~/.gitconfig
+ymir pubs
+ymir sub ~/.config/nvim
+ymir sub --from work.gitconfig --to ~/.gitconfig
 ymir sync
 ymir install-agent
 ```
@@ -191,24 +192,24 @@ ymir install-agent
 ### Per-machine destinations (the reason for `--to`)
 ```sh
 # work-laptop wants the work gitconfig at ~/.gitconfig:
-ymir add --from work.gitconfig --to ~/.gitconfig
+ymir sub --from work.gitconfig --to ~/.gitconfig
 # home-laptop wants a different source at the same local path:
-ymir add --from personal.gitconfig --to ~/.gitconfig
+ymir sub --from personal.gitconfig --to ~/.gitconfig
 ```
-Each spoke decided its own placement; the hub only had to `share` both files.
+Each spoke decided its own placement; the hub only had to `pub` both files.
 
 ### Stop sharing / stop receiving
 ```sh
 # hub: stop offering it (spokes stop pulling on next sync)
-ymir unshare ~/.zshrc
+ymir unpub ~/.zshrc
 # spoke: stop pulling it (keeps the local copy)
-ymir rm work.gitconfig
+ymir unsub work.gitconfig
 ```
 
 ### Curate from a laptop
 ```sh
 # on a spoke: push a file up and share it in one step
-ymir publish ~/.config/starship.toml
+ymir push ~/.config/starship.toml
 ```
 
 ## 9. Automation (launchd)
@@ -233,7 +234,7 @@ ymir uninstall-agent
   rejected). `MIRROR=1` never deletes for a remapped destination.
 - **Secret guard**: `.ssh/*  id_rsa  id_ed25519  *.pem  *.key  *.p12  *.pfx
   *.keychain*  .aws/credentials  .gnupg/*  .netrc  *.env  .env` are excluded from every
-  transfer and blocked by `share`/`publish` without `--force`.
+  transfer and blocked by `pub`/`push` without `--force`.
 
 ## 11. Troubleshooting
 
@@ -242,8 +243,8 @@ ymir uninstall-agent
 | `HUB_USER not set` | Spoke config missing the hub account; run `ymir setup` or set it. |
 | `failed to look up local user "X"` | Wrong `HUB_USER`; use the hub's `id -un`, not the tailnet email. |
 | `hub unreachable` | Hub offline, wrong `HUB_HOST`, or Tailscale SSH off on the hub. |
-| `not shared by hub, skipped: X` | The hub does not share `X`; `ymir share X` on the hub. |
-| Subscription not applying | Check `ymir list`; ensure the SHARE name matches `ymir catalog`. |
+| `not shared by hub, skipped: X` | The hub does not publish `X`; `ymir pub X` on the hub. |
+| Subscription not applying | Check `ymir subs`; ensure the SHARE name matches `ymir pubs`. |
 | rsync flag errors | Install GNU rsync: `brew install rsync`. |
 
 Logs: `tail -n 50 ~/.config/ymir/ymir.log`; peers: `tailscale status`.
@@ -257,15 +258,15 @@ R=/tmp/ymir-t; rm -rf "$R"; HB="$R/hub"; SP="$R/spoke"; mkdir -p "$HB/.config/ym
 echo zrc > "$HB/.zshrc"
 printf 'IS_HUB="1"\n' > "$HB/.config/ymir/config"
 printf 'TRANSPORT="local"\nHUB_ROOT="%s"\n' "$HB" > "$SP/.config/ymir/config"
-( cd "$HB" && HOME="$HB" ymir share .zshrc )
-( cd "$SP" && HOME="$SP" ymir add --to .zshrc-copy .zshrc && HOME="$SP" ymir sync )
+( cd "$HB" && HOME="$HB" ymir pub .zshrc )
+( cd "$SP" && HOME="$SP" ymir sub --to .zshrc-copy .zshrc && HOME="$SP" ymir sync )
 cat "$SP/.zshrc-copy"     # -> zrc
 ```
 
 ## 13. Scope and limitations
 
-- One-way pull; the hub is authoritative. No write-back from spokes (use `publish` to
-  push a file up deliberately).
+- One-way pull; the hub is authoritative. No write-back from spokes (use `push` to
+  send a file up deliberately).
 - Macs only. iOS nodes cannot run the agent; use a Tailscale file client read-only.
 - Paths may not contain spaces, ` -> `, ` @`, or single quotes (config paths in practice
   do not). A legacy line containing ` -> ` would be reparsed as a mapping.
@@ -285,5 +286,5 @@ independent.
 **Why not Taildrive?** Taildrive mounts a remote folder over WebDAV; it is remote access,
 not local sync, and would not survive the hub being offline.
 
-**Two-way sync?** Not by design. Use `publish` to push a specific file up; general
+**Two-way sync?** Not by design. Use `push` to send a specific file up; general
 bidirectional merge is out of scope (would need conflict handling).

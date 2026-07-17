@@ -273,7 +273,7 @@ cmd_share() {
     fi
     [ -e "$HOME/$rel" ] || warn "note: '$rel' does not exist on the hub yet"
     grep -qxF -- "$rel" "$CATALOG_FILE" || printf '%s\n' "$rel" >> "$CATALOG_FILE"
-    echo "shared: $rel"
+    echo "published: $rel"
   done
 }
 
@@ -286,13 +286,13 @@ cmd_unshare() {
       grep -vxF -- "$rel" "$CATALOG_FILE" > "$CATALOG_FILE.tmp" 2>/dev/null || true
       mv "$CATALOG_FILE.tmp" "$CATALOG_FILE"
     fi
-    echo "unshared: $rel"
+    echo "unpublished: $rel"
   done
 }
 
-cmd_shares() {
+cmd_pubs() {  # show the catalog (hub: local; spoke: the hub's, over the transport)
   local c; c="$(read_catalog)"
-  [ -n "$c" ] && printf '%s\n' "$c" || echo "(nothing shared)"
+  [ -n "$c" ] && printf '%s\n' "$c" || echo "(nothing published, or hub unreachable)"
 }
 
 # --- commands: spoke role (subscribe) -----------------------------------
@@ -372,11 +372,6 @@ cmd_list_subs() {
   done <<< "$subs"
 }
 
-cmd_catalog() {
-  local c; c="$(read_catalog)"
-  [ -n "$c" ] && printf '%s\n' "$c" || echo "(hub shares nothing, or is unreachable)"
-}
-
 cmd_publish() {
   local as=""
   [ "${1:-}" = "--as" ] && { as="${2:-}"; shift 2; }
@@ -394,7 +389,7 @@ cmd_publish() {
     local) mkdir -p "$HUB_ROOT/$(dirname "$share")"; "$rb" -a "${REX[@]}" "$HOME/$lrel$suffix" "$HUB_ROOT/$share$suffix" ;;
   esac
   hub_exec "mkdir -p \$HOME/.config/ymir; touch $REMOTE_CATALOG; grep -qxF -- '$share' $REMOTE_CATALOG || printf '%s\n' '$share' >> $REMOTE_CATALOG"
-  echo "published + shared: $share"
+  echo "pushed + published: $share"
 }
 
 # --- commands: sync / status --------------------------------------------
@@ -495,19 +490,19 @@ SETUP
   setup                guided interactive setup (prereqs, config, PATH, agent)
   init                 write the config template (~/.config/ymir/config)
 
-HUB (source of truth - decides what is offered)
-  share [--force] PATH..   add path(s) to the hub's share catalog
-  unshare PATH..           remove path(s) from the catalog
-  shares                   show the catalog
+HUB (source of truth - publishes what it offers)
+  pub [--force] PATH..     publish path(s) to the share catalog   (alias: share)
+  unpub PATH..             remove path(s) from the catalog        (alias: unshare)
+  pubs                     show the catalog
 
-SPOKE (decides what it pulls and where)
-  catalog                  show what the hub shares (alias: hub-ls)
-  add [--from SHARE] [--to DEST] SHARE..  subscribe; --from source, --to placement
-  add --all                subscribe to everything shared (same paths)
-  rm SHARE..               unsubscribe
-  list                     show this spoke's subscriptions (SHARE -> DEST)
+SPOKE (subscribes; decides what it pulls and where)
+  pubs                     show what the hub publishes            (alias: catalog, hub-ls)
+  sub [--from SHARE] [--to DEST] SHARE..  subscribe; --from source, --to placement (alias: add)
+  sub --all                subscribe to everything published (same paths)
+  unsub SHARE..            unsubscribe                            (alias: rm)
+  subs                     show this spoke's subscriptions        (alias: list)
   sync                     pull subscribed items: hub -> this machine
-  publish [--as SHARE] P   push a local path up to the hub and share it
+  push [--as SHARE] P      push a local path to the hub and publish it (alias: publish)
 
 COMMON
   status                   role, reachability, counts, last sync
@@ -516,8 +511,8 @@ COMMON
   help, --help, -h         this overview
 
 NOTE
-  `add`/`rm`/`list` are role-aware: on the hub (IS_HUB=1) they act on the share
-  catalog; on a spoke they act on this machine's subscriptions.
+  Shorthands `add`/`rm`/`list` are role-aware: on the hub they pub/unpub/show the
+  catalog; on a spoke they sub/unsub/show subscriptions.
 
 Full guide: docs/GUIDE.md
 EOF
@@ -536,7 +531,7 @@ ymir init - write ~/.config/ymir/config template (does not overwrite an existing
 Set IS_HUB=1 on the hub, or HUB_USER on a spoke.
 EOF
 ;;
-    share) cat <<'EOF'
+    pub|share) cat <<'EOF'
 ymir share [--force] PATH...   (run on the HUB)
 
   Add path(s) to the hub's share catalog (~/.config/ymir/shares.list) so spokes may
@@ -546,25 +541,20 @@ ymir share [--force] PATH...   (run on the HUB)
   Example:  ymir share ~/.zshrc ~/.config/nvim
 EOF
 ;;
-    unshare) cat <<'EOF'
+    unpub|unshare) cat <<'EOF'
 ymir unshare PATH...   (run on the HUB)
 
   Remove path(s) from the catalog. Spokes can no longer pull them on the next sync.
   Files are not deleted anywhere; only the catalog entry is removed.
 EOF
 ;;
-    shares) cat <<'EOF'
-ymir shares   (run on the HUB)   -> prints the share catalog.
+    pubs|shares|catalog|hub-ls) cat <<'EOF'
+ymir pubs   -> show the catalog. On the HUB it prints what this hub publishes; on a
+SPOKE it fetches and prints what the hub publishes, so you know which SHARE names you
+can subscribe to. Aliases: shares, catalog, hub-ls.
 EOF
 ;;
-    catalog|hub-ls) cat <<'EOF'
-ymir catalog   (run on a SPOKE)
-
-  Show what the hub currently shares, so you know which SHARE names you can subscribe
-  to with `ymir add`. Reads the hub catalog over Tailscale.
-EOF
-;;
-    add|subscribe) cat <<'EOF'
+    sub|subscribe|add) cat <<'EOF'
 ymir add [--from SHARE] [--to DEST] SHARE...   (SPOKE: subscribe)
 ymir add --all                                 subscribe to everything shared (same paths)
 ymir share ... (on the HUB)                    (add is role-aware; on the hub it shares)
@@ -583,7 +573,7 @@ ymir share ... (on the HUB)                    (add is role-aware; on the hub it
     ymir add --all                                      # take everything the hub shares
 EOF
 ;;
-    rm|remove|unsubscribe) cat <<'EOF'
+    unsub|rm|remove|unsubscribe) cat <<'EOF'
 ymir rm SHARE...   (SPOKE: unsubscribe; on the HUB it is unshare)
 
   Remove subscription(s) matching SHARE from this spoke's list. Local files are kept.
@@ -591,7 +581,7 @@ ymir rm SHARE...   (SPOKE: unsubscribe; on the HUB it is unshare)
   where `.a` is only the destination.
 EOF
 ;;
-    list|ls) cat <<'EOF'
+    subs|list|ls) cat <<'EOF'
 ymir list   -> on a SPOKE, this machine's subscriptions (SHARE -> DEST);
                on the HUB, the share catalog.
 EOF
@@ -606,7 +596,7 @@ ymir sync   (run on a SPOKE)
   This is what the launchd agent runs.
 EOF
 ;;
-    publish) cat <<'EOF'
+    push|publish) cat <<'EOF'
 ymir publish [--as SHARE] LOCALPATH   (run on a SPOKE)
 
   Push a local file/dir up to the hub and add it to the share catalog in one step, so
@@ -637,14 +627,20 @@ main() {
   case "$sub" in
     setup)                 cmd_setup "$@" ;;
     init)                  cmd_init "$@" ;;
-    add|subscribe)         load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_share "$@"; else cmd_subscribe "$@"; fi ;;
-    rm|remove|unsubscribe) load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_unshare "$@"; else cmd_unsubscribe "$@"; fi ;;
-    list|ls)               load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_shares; else cmd_list_subs; fi ;;
-    share)                 load_cfg; [ "$IS_HUB" = "1" ] || die "run 'share' on the hub (IS_HUB=1)"; cmd_share "$@" ;;
-    unshare)               load_cfg; [ "$IS_HUB" = "1" ] || die "run 'unshare' on the hub (IS_HUB=1)"; cmd_unshare "$@" ;;
-    shares)                load_cfg; cmd_shares "$@" ;;
-    catalog|hub-ls)        load_cfg; cmd_catalog "$@" ;;
-    publish)               load_cfg; [ "$IS_HUB" = "1" ] && die "publish is for spokes; on the hub just place the file and 'ymir share'"; cmd_publish "$@" ;;
+    # hub verbs (publish)
+    pub|share)             load_cfg; [ "$IS_HUB" = "1" ] || die "run 'pub' on the hub (IS_HUB=1)"; cmd_share "$@" ;;
+    unpub|unshare)         load_cfg; [ "$IS_HUB" = "1" ] || die "run 'unpub' on the hub (IS_HUB=1)"; cmd_unshare "$@" ;;
+    pubs|shares|catalog|hub-ls) load_cfg; cmd_pubs "$@" ;;
+    # spoke verbs (subscribe)
+    sub|subscribe)         load_cfg; [ "$IS_HUB" = "1" ] && die "run 'sub' on a spoke (this machine is the hub)"; cmd_subscribe "$@" ;;
+    unsub|unsubscribe)     load_cfg; [ "$IS_HUB" = "1" ] && die "run 'unsub' on a spoke (this machine is the hub)"; cmd_unsubscribe "$@" ;;
+    subs)                  load_cfg; [ "$IS_HUB" = "1" ] && die "run 'subs' on a spoke (this machine is the hub)"; cmd_list_subs "$@" ;;
+    push|publish)          load_cfg; [ "$IS_HUB" = "1" ] && die "push is for spokes; on the hub place the file and 'ymir pub'"; cmd_publish "$@" ;;
+    # role-aware shorthands
+    add)                   load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_share "$@"; else cmd_subscribe "$@"; fi ;;
+    rm|remove)             load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_unshare "$@"; else cmd_unsubscribe "$@"; fi ;;
+    list|ls)               load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_pubs; else cmd_list_subs; fi ;;
+    # common
     sync)                  load_cfg; cmd_sync "$@" ;;
     status)                load_cfg; cmd_status "$@" ;;
     install-agent)         load_cfg; cmd_install_agent "$@" ;;

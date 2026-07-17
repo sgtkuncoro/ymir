@@ -33,28 +33,28 @@ ymir status
 
 ## Use
 
-### On the hub (decide what to share)
+### On the hub (publish what you offer)
 ```sh
-ymir share ~/.zshrc ~/.config/nvim ~/work.gitconfig
-ymir shares
-ymir unshare ~/.zshrc
+ymir pub ~/.zshrc ~/.config/nvim ~/work.gitconfig
+ymir pubs
+ymir unpub ~/.zshrc
 ```
 
-### On each spoke (decide what you pull and where)
+### On each spoke (subscribe; decide what you pull and where)
 ```sh
-ymir catalog                                  # see what the hub offers
-ymir add ~/.config/nvim                                # subscribe, same path
-ymir add --from work.gitconfig --to ~/.gitconfig       # explicit: hub source -> local dest
-ymir add --to ~/.gitconfig work.gitconfig              # same thing, positional shorthand
-ymir add --all                                # subscribe to everything shared
-ymir list                                     # your subscriptions (SHARE -> DEST)
-ymir sync                                      # pull them down
-ymir install-agent                            # auto-sync on an interval
+ymir pubs                                              # see what the hub publishes
+ymir sub ~/.config/nvim                                # subscribe, same path
+ymir sub --from work.gitconfig --to ~/.gitconfig       # explicit: hub source -> local dest
+ymir sub --to ~/.gitconfig work.gitconfig              # same thing, positional shorthand
+ymir sub --all                                         # subscribe to everything published
+ymir subs                                              # your subscriptions (SHARE -> DEST)
+ymir sync                                              # pull them down
+ymir install-agent                                     # auto-sync on an interval
 ```
 
-`add`/`rm`/`list` are role-aware: on the hub they act on the **share catalog**; on a
-spoke they act on that spoke's **subscriptions**. Optional: `ymir publish ~/file` pushes
-a local file up to the hub and shares it in one step.
+Aliases: `add`/`rm`/`list` are role-aware shorthands (hub: `pub`/`unpub`/`pubs`; spoke:
+`sub`/`unsub`/`subs`). Optional: `ymir push ~/file` pushes a local file up to the hub and
+publishes it in one step.
 
 ## Config (`~/.config/ymir/config`)
 
