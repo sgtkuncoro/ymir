@@ -22,9 +22,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y shellcheck rsync
 
-      - name: Install shellcheck (macOS; rsync ships with the runner)
+      - name: Install shellcheck + GNU rsync (macOS; ymir requires GNU rsync)
         if: runner.os == 'macOS'
-        run: brew install shellcheck
+        run: brew install shellcheck rsync
 
       - name: Lint
         run: shellcheck -S warning bin/ymir tests/parse.sh tests/run.sh
