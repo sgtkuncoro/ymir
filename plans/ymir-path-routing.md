@@ -1,220 +1,169 @@
-# Blueprint: ymir path routing + per-spoke targeting
+# Blueprint: ymir spoke-defined routing
 
-Objective: let a hub path map to a different destination path on a spoke, and let a
-path be delivered to specific spokes only, instead of "same path, all spokes".
+Objective: each spoke decides which hub files it wants and where they land locally.
+The hub just holds files; it needs zero knowledge of the spokes.
 
-Status: REVIEWED (adversarial review incorporated; ready to implement)
-Mode: git present (origin github.com/sgtkuncoro/ymir, default branch `main`).
-Repo convention is commit-directly-to-`main` (single-writer personal repo), so each
-step below is one focused commit on `main`. Rollback = `git revert <sha>`.
-
-Review: architect pass raised C1-C3 (data-loss/security) + M1-M3 (silent mismatch);
-all folded into the Design and Steps below. See "Review fixes" tags inline.
+Status: REVIEWED design pivot (was hub-defined; user chose spoke-defined routing).
+Mode: git present (origin github.com/sgtkuncoro/ymir, `main`). One commit per step.
 
 ---
 
-## Problem (why this plan exists)
+## Why this model (resolves the earlier objection)
 
-Today the manifest (`~/.config/ymir/paths.list` on the hub) is a flat list of
-HOME-relative paths. `sync` copies `hub:~/<rel>` -> `spoke:~/<rel>` for **every**
-entry on **every** spoke. There is:
-- no source->destination mapping (a path must land at the same relative location), and
-- no per-spoke targeting (you cannot send a path to laptop-a but not laptop-b).
+Objection: "the hub doesn't know the spokes, so it can't define a per-spoke dest."
+Correct. So we move the routing to the spoke:
 
-Question this answers: "how do we know a hub path is for a specific spoke path?" ->
-each manifest entry gains an optional destination and an optional target list.
+- **Hub** = a bag of files (the master copies). Knows nothing about spokes.
+- **Spoke** = keeps its OWN list of pull rules: "get `hub:SRC`, put it at my `DEST`".
+- Each spoke only ever manages its own list, so per-machine destinations are natural
+  and `--for`/targeting/`NODE_NAME` disappear entirely.
 
-## Design (the contract every step implements)
+This is a change from today, where the list lives on the hub and is shared. After this
+change the list lives **locally on each spoke**.
 
-### Manifest v2 line grammar (backward compatible)
-
-```
-SRC [-> DEST] [@NODE[,NODE...]]
-```
-
-- `SRC`  HOME-relative source path on the hub (required).
-- `DEST` HOME-relative destination on the spoke (optional; defaults to `SRC`).
-- `@NODE,...` comma list of spoke node names this entry applies to (optional;
-  absent = all spokes). Node names are canonicalized lowercase.
-
-Existing plain lines (`.zshrc`, `.config/nvim`) parse as `SRC=DEST`, all spokes -> no
-migration. Examples:
-
-```
-.zshrc
-.config/work.gitconfig -> .gitconfig @work-laptop
-.config/nvim @home-laptop,travel-laptop
+```mermaid
+flowchart LR
+  H[(hub: master files)]
+  subgraph work-laptop
+    LW[list: work.gitconfig -> .gitconfig]
+  end
+  subgraph home-laptop
+    LH[list: personal.gitconfig -> .gitconfig]
+  end
+  H -->|sync pulls per its own list| LW
+  H -->|sync pulls per its own list| LH
 ```
 
-Parsing (pure bash 3.2, no arrays): split on the LAST ` @` for targets, then on the
-FIRST ` -> ` for dest. Trim each field with `${x#"${x%%[![:space:]]*}"}` /
-`${x%"${x##*[![:space:]]}"}` so a trailing `\r` (CRLF manifest) is stripped [m2].
-Strip a trailing `/` from `DEST` before appending the dir suffix [m2].
+## Grammar (spoke-local manifest: `~/.config/ymir/paths.list` on each spoke)
 
-### DEST validation (security) [C3, M1]
+```
+SRC [-> DEST]
+```
+- `SRC`  path on the hub (HOME-relative).
+- `DEST` path on THIS spoke (HOME-relative); defaults to `SRC`.
+- No `@targets` and no `NODE_NAME` (the list is already per-spoke).
 
-`DEST` is a free-text, hand-editable field. Before it is ever used as `$HOME/$DEST`:
-- reject a leading `/` (absolute) and any `..` path segment -> skip+warn (never `die`
-  mid-sync; log and continue with the other entries).
-- `ymir add --to DEST` runs `DEST` through `to_rel` first and rejects anything that
-  resolves outside `$HOME`.
+Plain lines stay valid (`.zshrc` = pull `hub:~/.zshrc` -> `~/.zshrc`).
 
-### Node identity [M3, m4]
+## Command semantics (all run ON the spoke; no SSH needed to edit the list)
 
-New per-machine config value `NODE_NAME` identifies a spoke for `@` targeting.
-Derive (canonical lowercase, both branches):
-`NODE_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"; NODE_NAME="$(printf '%s' "$NODE_NAME" | tr 'A-Z' 'a-z')"`.
-`--for` values and `@` targets are lowercased at write and matched case-insensitively.
-If `NODE_NAME` is empty AND any parsed entry has targets, `warn` once (targets would
-silently never apply otherwise).
+| Command | Runs on | Effect |
+|---|---|---|
+| `ymir add [--to DEST] SRC...` | spoke | add pull rule(s) to the LOCAL list |
+| `ymir rm SRC...` | spoke | remove local rule(s) by SRC |
+| `ymir list` | spoke | show this spoke's rules |
+| `ymir sync` | spoke | pull each rule hub:SRC -> local:DEST |
+| `ymir status` | spoke | hub reachable, rule count, last sync |
+| `ymir hub-ls [PATH]` | spoke | list what's available under the hub's home (discovery) |
+| `ymir publish [--as SRC] LOCALPATH` | spoke | push a local file UP to the hub (optional) |
 
-### Sync rule [C1, C2, m6]
+Hub side: just hold files. `ymir status` on the hub (IS_HUB=1) reports role HUB; add/
+rm/list/sync are no-ops there (the hub does not subscribe).
 
-For each raw line:
-1. `parse_entry` FIRST unconditionally resets `E_SRC="" E_DEST="" E_TARGETS=""`, then
-   parses, then `E_DEST=${E_DEST:-$E_SRC}`. (Prevents a targeted line leaking its
-   target/dest into the next plain line.) [C1]
-2. Validate `E_DEST` (see above); invalid -> skip+warn.
-3. `entry_applies` (targets empty OR NODE_NAME in list) checked BEFORE any `hub_exec`
-   round trip; not-applies -> `skip=$((skip+1)); continue`. [m6]
-4. rsync `hub:E_SRC` -> `$HOME/E_DEST` (dir/file suffix from `test -d E_SRC`).
-5. `--delete` (MIRROR=1) is applied ONLY when `E_DEST == E_SRC`. A remapped DEST never
-   mirror-deletes, so a line like `x -> .config` can never wipe unrelated `~/.config`
-   subtrees. [C2]
+## Safety / correctness (carried from the prior adversarial review)
 
-### rm matching [M2, m3]
+- **DEST validation** [C3/M1]: reject leading `/` or any `..` segment; `--to` runs
+  through `to_rel` and must resolve inside `$HOME`. Never build `$HOME/$DEST` from an
+  unvalidated field.
+- **MIRROR delete-gating** [C2]: `--delete` (MIRROR=1) applies only when `DEST == SRC`,
+  so a remap can never wipe a shared parent dir on the spoke.
+- **Parser reset** [C1]: `parse_entry` resets `E_SRC/E_DEST` first, then recomputes
+  `E_DEST=${E_DEST:-$E_SRC}`.
+- **rm by SRC field** [M2]: decode each line's SRC and compare equal; never bare grep.
+- **Trim/CRLF** [m2]: strip surrounding whitespace incl `\r`; strip trailing `/` from
+  DEST before adding the dir suffix.
+- **Sourcing guard** [m5]: `[ "${BASH_SOURCE[0]}" = "$0" ] && main "$@"` for testability.
+- Secret guard still applies to SRC. Still one-way pull.
 
-`rm SRC` must match the SRC field only, not the whole line and not as a regex. Decode
-each manifest line's SRC (same split rule) and compare for string equality. `--for
-NODES` removes only entries whose (normalized: lowercased, comma-sorted, space-
-stripped) target list equals the normalized NODES; without `--for`, remove all entries
-with that SRC. Never use bare `grep` for this.
+## Non-goals
 
-### Constraints / non-goals
-
-- Paths still may not contain spaces, ` -> `, ` @`, or single quotes (documented; a
-  pre-existing flat line containing a literal ` @` would re-parse as a target -> noted
-  in docs as a migration caveat) [m1, m8].
-- Directory remap uses rsync contents-merge semantics (`dir/ -> other/`); documented
-  explicitly so it is not surprising [m10].
-- Secret guard still applies to `SRC`. Still one-way pull; no write-back. No wildcard
-  targets.
+- No `@targets`/`NODE_NAME` (dropped; per-spoke list replaces them).
+- No spaces / ` -> ` / single quotes in paths (documented limitation).
+- Directory remap uses rsync contents-merge; documented.
 
 ---
 
 ## Steps
 
-### Step 1 - Parser, identity, sourcing guard, tests  [model: strongest]
+### Step 1 - Move the list to the spoke + SRC->DEST parser + tests  [strongest]
 
-Context brief: `bin/ymir` reads via `read_manifest()` (~line 123); defaults ~line 24;
-`cmd_init` template ~line 130; `load_cfg` ~line 64; `main "$@"` runs at file bottom.
-
-Tasks:
-1. Add `NODE_NAME=""` to defaults + `cmd_init` template (comment: "this spoke's
-   identity for @targeting; default = local hostname, lowercased").
-2. In `load_cfg`, derive `NODE_NAME` lowercased from LocalHostName else `hostname -s`
-   when empty [M3].
-3. Add `parse_entry LINE`: reset E_SRC/E_DEST/E_TARGETS first [C1]; split last ` @`
-   then first ` -> `; trim (incl `\r`) [m2]; strip trailing `/` from E_DEST [m2];
-   `E_DEST=${E_DEST:-$E_SRC}`.
-4. Add `dest_ok DEST` -> false on leading `/` or any `..` segment [C3].
-5. Add `entry_applies` -> case-insensitive membership; empty targets = all.
-6. Guard the bottom of the file: `[ "${BASH_SOURCE[0]}" = "${0}" ] && main "$@"` so it
-   can be sourced for unit tests [m5].
-7. Add `tests/parse.sh`: source ymir, assert parse of plain / dest-only / target-only /
-   dest+target, AND plain-line-after-targeted yields empty targets [C1 regression],
-   dest_ok rejects `../x` and `/x`, entry_applies case-insensitive [m9].
-
-Verification: `bash tests/parse.sh` all pass; `bash -n bin/ymir` clean; existing local
-smoke (seed+pull of plain lines) unchanged.
-Exit: parser+identity+guard+tests committed; no behavior change for plain lines.
-
-### Step 2 - Routing-aware sync  [model: default]  (depends: Step 1)
-
-Context brief: `cmd_sync` loop ~lines 285-301.
+Context: today `read_manifest`/`cmd_add`/`cmd_rm`/`cmd_list` operate on the HUB manifest
+via `hub_exec`. This step makes the list LOCAL.
 
 Tasks:
-1. Init `skip=0` under set -u [m6].
-2. Per line: `parse_entry`; `dest_ok "$E_DEST"` false -> warn+skip; `entry_applies`
-   false -> skip++ + continue BEFORE the `test -d` round trip [m6].
-3. rsync uses `E_SRC` (hub) and `E_DEST` (`$HOME/$E_DEST`); `mkdir -p` dest parent;
-   dir suffix from `test -d E_SRC`.
-4. Apply `--delete` only when `E_DEST = E_SRC` [C2].
-5. Summary line reports synced / skipped / failed.
+1. Point `read_manifest`, `cmd_add`, `cmd_rm`, `cmd_list` at the LOCAL
+   `$CFG_DIR/paths.list` (no `hub_exec` for list management).
+2. Add `parse_entry` (reset-first, split ` -> `, trim incl `\r`, strip trailing `/` on
+   DEST, `E_DEST=${E_DEST:-$E_SRC}`) and `dest_ok` (reject `/` prefix and `..`).
+3. Sourcing guard at file bottom; add `tests/parse.sh` covering plain / dest-only /
+   plain-after-dest reset / dest_ok rejects `../x` and `/x`.
+4. `cmd_add` keeps the secret guard on SRC; dedup on the composed line.
 
-Verification (local transport, NODE_NAME set): `.a -> .b` lands at `~/.b`; `.c @x`
-pulled when NODE_NAME=x, skipped when =y; plain line -> same path; MIRROR=1 with a
-remap does NOT delete the dest siblings (assert an unrelated file under dest survives);
-plain-after-targeted still pulls (C1). `bash -n` clean.
-Exit: sync honors dest + targets + safe delete-gating; plain behavior intact.
+Verify: `bash tests/parse.sh`; `bash -n bin/ymir`; `ymir add`/`list`/`rm` edit the local
+file with no hub round trip (test with hub unreachable).
+Exit: list is spoke-local; parser + tests committed.
 
-### Step 3 - add/rm/list/status routing  [model: default]  (depends: Step 2)
-
-Context brief: `cmd_add` ~228, `cmd_rm` ~259, `cmd_list` ~165, `cmd_status` ~308.
+### Step 2 - Routing-aware sync from the local list  [default]  (dep: Step 1)
 
 Tasks:
-1. `cmd_add`: parse `--to DEST` (requires exactly ONE path; multi-path -> error),
-   `--for NODES`. Normalize DEST via `to_rel` + `dest_ok` (reject outside HOME) [M1,C3];
-   lowercase+sort+strip NODES [m3]. Compose `SRC[ -> DEST][ @NODES]`; dedup on composed
-   line. Seed keyed on SRC only.
-2. `cmd_rm`: decode SRC per line and compare equal (no bare grep) [M2]; `--for` removes
-   only entries whose normalized targets equal normalized NODES [m3]; else all with SRC.
-3. `cmd_list`: render `SRC[ -> DEST][ @nodes]` (omit `-> DEST` when equal, `@` when all).
-4. `cmd_status`: print this machine's `NODE_NAME` and count of applicable entries;
-   warn if NODE_NAME empty while targeted entries exist [m4].
-5. Update `usage` + `help_topic` for add/rm flags.
+1. `cmd_sync` reads the LOCAL list; per line `parse_entry`; `dest_ok` false -> warn+skip.
+2. rsync `hub:E_SRC` -> `$HOME/E_DEST`; dir suffix from remote `test -d E_SRC`;
+   `mkdir -p` dest parent.
+3. `--delete` only when `E_DEST == E_SRC` [C2].
+4. Summary: synced / skipped / failed.
 
-Verification: `add --to .b .a` -> `.a -> .b`; `add --for X .c` -> `.c @x`;
-`add --to x .a .b` errors; `add --to ../evil .a` rejected; `rm .a` drops only `.a` (not
-`.abc`); `list` renders; `bash -n` clean.
-Exit: routing fully manageable from the CLI; help updated.
+Verify (local transport): `.a -> .b` lands at `~/.b`; plain line same path; MIRROR=1 with
+a remap does not delete dest siblings (assert an unrelated file survives).
+Exit: sync pulls per the local rules with safe delete-gating.
 
-### Step 4 - setup NODE_NAME + docs  [model: default]  (depends: Step 3)
-
-Context brief: `cmd_setup` spoke branch + heredoc; docs README/GUIDE/capability.
+### Step 3 - `--to`, discovery, publish, status/help/docs  [default]  (dep: Step 2)
 
 Tasks:
-1. `cmd_setup`: on a spoke, prompt `NODE_NAME` (default derived) and write it; show in
-   summary.
-2. GUIDE.md: "Path routing and per-spoke targeting" section (grammar, examples, --to/
-   --for, NODE_NAME, DEST safety, dir-merge semantics [m10], legacy ` @` caveat [m1]);
-   add keys to config table + command reference.
-3. README.md: short routing example + NODE_NAME row.
-4. capability doc: mark routing/targeting delivered.
-5. Keep everything generic (no real machine names).
+1. `cmd_add`: `--to DEST` (single SRC; multi -> error) normalized via `to_rel` + `dest_ok`.
+2. `cmd_add` seed/publish: if `hub:SRC` missing but local `DEST` exists, offer to push
+   local `DEST` -> `hub:SRC` (keeps the convenient first-time upload).
+3. `ymir hub-ls [PATH]`: list entries under the hub home (or PATH) so you can see what
+   SRC values exist to pull. (`hub_exec "ls -1 ~/PATH"`.)
+4. `ymir publish [--as SRC] LOCALPATH`: explicit push of a local file up to the hub.
+5. `cmd_list` renders `SRC -> DEST` (omit `-> DEST` when equal). `cmd_status` shows
+   rule count + hub reachability. Update usage + help_topic.
 
-Verification: `ymir setup` (pty + non-interactive) writes NODE_NAME; docs fences
-balanced; `bash -n` clean; full regression (plain + mapped + targeted + MIRROR-safe).
-Exit: identity configurable; routing documented.
+Verify: `add --to .b .a` -> local line `.a -> .b`; `add --to ../evil .a` rejected;
+`hub-ls` lists hub files; `rm .a` drops only `.a`.
+Exit: full spoke-defined routing usable end to end.
+
+### Step 4 - setup + docs  [default]  (dep: Step 3)
+
+Tasks:
+1. `cmd_setup`: spoke path unchanged except it explains the list is local; hub path
+   unchanged. (No NODE_NAME needed anymore - remove any prior NODE_NAME wording.)
+2. GUIDE.md: rewrite routing section for the spoke-defined model (grammar, `--to`,
+   `hub-ls`, `publish`, examples, DEST safety, dir-merge caveat).
+3. README.md: short spoke-defined example.
+4. capability doc: mark spoke-defined routing delivered.
+
+Verify: `ymir setup` writes correct config; docs fences balanced; full regression
+(plain + mapped, hub-ls, publish); `bash -n` clean.
+Exit: documented + configurable.
 
 ---
 
 ## Dependency graph
 
 ```
-Step1 -> Step2 -> Step3 -> Step4
+Step1 -> Step2 -> Step3 -> Step4    (all edit bin/ymir -> serial)
 ```
 
-All steps edit `bin/ymir`, so strictly serial (shared file = no parallelism). Total: 4
-commits on `main`.
-
-## Invariants verified after every step
+## Invariants after every step
 
 - `bash tests/parse.sh` + `bash -n bin/ymir` pass.
-- Flat-manifest behavior unchanged (back-compat).
-- Local-transport smoke (seed-up + pull-down) passes.
-- No real machine names / IPs / usernames introduced.
-- No manifest entry can write outside `$HOME`; MIRROR never deletes a remapped dest.
+- Managing the list needs NO hub connection (it is local); only `sync`/`hub-ls`/
+  `publish` touch the hub.
+- No rule can write outside `$HOME`; MIRROR never deletes a remapped dest.
+- No real machine names / IPs / usernames in the repo.
 
-## Resolved review findings
+## Migration note
 
-C1 parser reset - Step 1.3/1.7. C2 delete-gating - Step 2.4. C3 DEST traversal -
-Step 1.4 + Step 2.2 + Step 3.1. M1 --to via to_rel - Step 3.1. M2 rm SRC-field -
-Step 3.2. M3 NODE_NAME case - Design + Step 1.2/3.1. m2 trim/CRLF/slash - Step 1.3.
-m4 empty-NODE_NAME warn - Step 3.4. m5 source guard - Step 1.6. m6 skip init/order -
-Step 2.1-2. m9 tests - Step 1.7. m1/m10 doc caveats - Step 4.2.
-
-## Remaining accepted risks (documented, not fixed)
-
-- m7 dedup on raw composed line (near-dup on hand-edit) - acceptable.
-- m8 single-quote in path breaks remote manifest write - forbidden by constraints doc.
+Existing installs keep the hub manifest; after this change the list is read locally. On
+each spoke, re-add the paths you want (or copy the old hub `paths.list` down once). This
+is a one-time, documented step.
