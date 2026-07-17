@@ -23,7 +23,8 @@ assert_absent()  { if [ ! -e "$2" ]; then pass "$1"; else fail "$1" "expected ab
 assert_contains(){ case "$2" in *"$3"*) pass "$1" ;; *) fail "$1" "expected to contain: [$3]"$'\n'"in: [$2]" ;; esac; }
 
 setup_case() { # setup_case [extra spoke config lines...]
-  CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ymir.XXXXXX")"
+  local base="${TMPDIR:-/tmp}"; base="${base%/}"   # avoid // when TMPDIR ends in / (macOS)
+  CASE_DIR="$(mktemp -d "$base/ymir.XXXXXX")"
   HUBH="$CASE_DIR/hub"; SPOKEH="$CASE_DIR/spoke"
   mkdir -p "$HUBH/.config/ymir" "$SPOKEH/.config/ymir"
   printf 'IS_HUB="1"\n' > "$HUBH/.config/ymir/config"
