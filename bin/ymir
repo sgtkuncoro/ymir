@@ -1,43 +1,46 @@
 #!/usr/bin/env bash
 #
-# ymir - sync/mirror a managed list of paths across a Tailscale tailnet.
+# ymir - publish/subscribe config sync over a Tailscale tailnet.
 #
-# Model: one-way PULL from a single hub (source of truth) to this machine.
-#   - The hub owns the manifest (~/.config/ymir/paths.list) and the canonical files.
-#   - Paths are stored HOME-relative, so a hub user (e.g. "alice") and a local user
-#     (e.g. "bob") map correctly even though /Users/<name> differs.
-#   - `add`/`rm`/`list` edit the hub manifest. `sync` pulls hub -> local.
-#   - Files are kept in place (no symlinks). Secrets are excluded by default.
+# Model:
+#   - The HUB is the source of truth. It publishes a "share catalog" (shares.list):
+#     the set of HOME-relative paths it offers. Run `share`/`unshare`/`shares` there.
+#   - Each SPOKE keeps its OWN subscription list (paths.list): which shared items it
+#     pulls and WHERE they land locally (`SHARE -> DEST`). Run `add`/`rm`/`list`/`sync`.
+#   - A spoke may only pull a path the hub currently shares (the hub is the gatekeeper).
+#   - Paths are HOME-relative so different local usernames map correctly.
+#   - One-way pull, files in place, secrets excluded by default.
 #
-# Transport: ssh over Tailscale (hub reached by its MagicDNS name). A `local`
-# transport exists for testing (treats $HUB_ROOT as a fake hub home).
+# Transport: ssh over Tailscale (hub reached by MagicDNS name). A `local` transport
+# exists for testing (treats $HUB_ROOT as a fake hub $HOME).
 #
 set -euo pipefail
 
 CFG_DIR="${YMIR_CFG_DIR:-$HOME/.config/ymir}"
 CFG_FILE="$CFG_DIR/config"
-LOCAL_MANIFEST="$CFG_DIR/paths.list.cache"
+CATALOG_FILE="$CFG_DIR/shares.list"   # hub role: what this hub offers
+SUBS_FILE="$CFG_DIR/paths.list"       # spoke role: what this spoke pulls + placement
 STATE_FILE="$CFG_DIR/last-sync"
 LOG_FILE="${YMIR_LOG:-$CFG_DIR/ymir.log}"
 
 # --- defaults (overridable in $CFG_FILE) ---------------------------------
 HUB_HOST="hub"          # your hub's Tailscale MagicDNS name (override in config)
-HUB_USER=""              # REQUIRED: local macOS username on the hub
+HUB_USER=""             # REQUIRED on a spoke: local macOS username on the hub
 TRANSPORT="ssh"         # ssh | local
 HUB_ROOT=""             # only for TRANSPORT=local: path acting as hub $HOME
-IS_HUB="0"              # 1 => THIS machine is the hub (curate here; sync is a no-op)
-MIRROR="0"              # 1 => rsync --delete (destructive on the receiver)
+IS_HUB="0"              # 1 => THIS machine is the hub (publish here; sync is a no-op)
+MIRROR="0"              # 1 => rsync --delete (only when DEST==SHARE)
 INTERVAL="300"          # launchd StartInterval seconds
 HUB_RSYNC_PATH=""       # optional --rsync-path for the hub (e.g. /opt/homebrew/bin/rsync)
 SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
-# Secret patterns excluded from every transfer AND blocked by `add` (use --force).
+# Secret patterns excluded from every transfer AND blocked by share/publish (--force).
 SECRET_PATTERNS=(
   ".ssh/*" "id_rsa" "id_ed25519" "*.pem" "*.key" "*.p12" "*.pfx"
   "*.keychain*" ".aws/credentials" ".gnupg/*" ".netrc" "*.env" ".env"
 )
 
-REMOTE_MANIFEST='$HOME/.config/ymir/paths.list'   # expanded on the hub
+REMOTE_CATALOG='$HOME/.config/ymir/shares.list'   # expanded on the hub
 
 # --- helpers -------------------------------------------------------------
 die()  { printf 'ymir: %s\n' "$*" >&2; exit 1; }
@@ -89,6 +92,33 @@ build_excludes() {
   for p in "${SECRET_PATTERNS[@]}"; do REX+=(--exclude="$p"); done
 }
 
+# Trim surrounding whitespace (incl trailing \r from CRLF).
+_trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+
+# Parse a subscription line "SRC [-> DEST]" into globals E_SRC / E_DEST.
+parse_entry() {
+  E_SRC=""; E_DEST=""
+  local line="$1" src dest=""
+  if [ "$line" != "${line%% -> *}" ]; then
+    src="${line%% -> *}"; dest="${line#* -> }"
+  else
+    src="$line"
+  fi
+  E_SRC="$(_trim "$src")"
+  E_DEST="$(_trim "$dest")"
+  E_DEST="${E_DEST%/}"          # strip trailing slash
+  [ -n "$E_DEST" ] || E_DEST="$E_SRC"
+}
+
+# Reject a destination that escapes $HOME.
+dest_ok() {
+  case "$1" in
+    /*) return 1 ;;                     # absolute
+    ..|../*|*/..|*/../*) return 1 ;;    # .. segment
+    *) return 0 ;;
+  esac
+}
+
 # Normalise an input path to a HOME-relative entry (or absolute if outside HOME).
 to_rel() {
   local in="$1" abs
@@ -96,16 +126,14 @@ to_rel() {
     "~/"*) in="$HOME/${in#\~/}" ;;
     "~")   in="$HOME" ;;
   esac
-  # absolutise without requiring existence
   case "$in" in
     /*) abs="$in" ;;
     *)  abs="$PWD/$in" ;;
   esac
-  # strip trailing slash
   abs="${abs%/}"
   case "$abs/" in
     "$HOME/"*) printf '%s' "${abs#$HOME/}" ;;
-    *)         printf '%s' "$abs" ;;  # outside HOME: keep absolute (won't remap)
+    *)         printf '%s' "$abs" ;;
   esac
 }
 
@@ -120,30 +148,40 @@ is_secret() {
   return 1
 }
 
-read_manifest() { hub_exec "cat $REMOTE_MANIFEST 2>/dev/null" | sed '/^\s*#/d; /^\s*$/d'; }
+# The hub's share catalog (plain HOME-relative paths).
+read_catalog() {
+  if [ "$IS_HUB" = "1" ]; then
+    sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$CATALOG_FILE" 2>/dev/null || true
+  else
+    hub_exec "cat $REMOTE_CATALOG 2>/dev/null" | sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' || true
+  fi
+}
 
-# --- commands ------------------------------------------------------------
+# This spoke's subscription list (raw lines).
+read_subs() { sed '/^[[:space:]]*#/d;/^[[:space:]]*$/d' "$SUBS_FILE" 2>/dev/null || true; }
+
+in_catalog() { printf '%s\n' "$1" | grep -qxF -- "$2"; }  # <catalog> <src>
+
+# --- commands: config ----------------------------------------------------
 cmd_init() {
   mkdir -p "$CFG_DIR"
   if [ -f "$CFG_FILE" ]; then warn "config already exists at $CFG_FILE"; return; fi
   cat >"$CFG_FILE" <<EOF
 # ymir config ($(hostname))
 HUB_HOST="hub"           # your hub's Tailscale MagicDNS name
-HUB_USER=""              # REQUIRED: run 'id -un' on the hub and paste it here
-IS_HUB="0"               # set to 1 ON THE HUB to curate paths there directly
+HUB_USER=""              # spoke only: run 'id -un' on the hub and paste it here
+IS_HUB="0"               # set to 1 ON THE HUB (publish/share here)
 TRANSPORT="ssh"          # ssh | local
-MIRROR="0"               # 1 => delete files on this machine that are gone on the hub
+MIRROR="0"               # 1 => delete local files gone on the hub (only for same-path)
 INTERVAL="300"           # launchd sync interval (seconds)
 HUB_RSYNC_PATH=""        # e.g. /opt/homebrew/bin/rsync if the hub has GNU rsync
 EOF
-  printf 'Wrote %s\nSet HUB_USER, then: ymir status\n' "$CFG_FILE"
+  printf 'Wrote %s\nEdit it (HUB_USER on a spoke, or IS_HUB=1 on the hub), then: ymir status\n' "$CFG_FILE"
 }
 
 cmd_setup() {
   mkdir -p "$CFG_DIR"
   echo "== ymir setup ==" >&2; echo >&2
-
-  # 1. prerequisites
   if command -v tailscale >/dev/null 2>&1; then
     if tailscale status >/dev/null 2>&1; then echo "[ok] tailscale connected" >&2
     else warn "tailscale installed but not connected - run: tailscale up"; fi
@@ -155,14 +193,13 @@ cmd_setup() {
   else warn "GNU rsync recommended: brew install rsync"; fi
   echo >&2
 
-  # 2. role
   local role ishub="0" hubhost="$HUB_HOST" hubuser="" rsyncpath=""
-  ask role "Is this machine the HUB (curate here) or a SPOKE (receives config)? (hub/spoke)" "spoke"
+  ask role "Is this machine the HUB (publish/share) or a SPOKE (subscribe/pull)? (hub/spoke)" "spoke"
   case "$role" in hub|HUB|h|H) ishub="1" ;; *) ishub="0" ;; esac
 
   if [ "$ishub" = "1" ]; then
     ask hubhost "Label for this hub (cosmetic)" "$(scutil --get LocalHostName 2>/dev/null || echo "$HUB_HOST")"
-    echo "[ok] hub account: $(id -un) (this machine is the source of truth)" >&2
+    echo "[ok] hub account: $(id -un) (source of truth)" >&2
   else
     ask hubhost "Hub MagicDNS name (Tailscale)" "$HUB_HOST"
     hubuser="$USER"
@@ -181,7 +218,6 @@ cmd_setup() {
     done
   fi
 
-  # 3. write config
   if [ -f "$CFG_FILE" ] && ! confirm "Config exists at $CFG_FILE. Overwrite?" N; then
     echo "Keeping existing config." >&2
   else
@@ -198,7 +234,6 @@ EOF
     echo "[ok] wrote $CFG_FILE" >&2
   fi
 
-  # 4. put on PATH
   if ! command -v ymir >/dev/null 2>&1 && [ -d /opt/homebrew/bin ]; then
     local self; self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
     if confirm "Symlink 'ymir' into /opt/homebrew/bin (PATH)?" Y; then
@@ -207,116 +242,209 @@ EOF
   fi
   echo >&2
 
-  # 5. role-specific finish
   if [ "$ishub" = "1" ]; then
     cat >&2 <<'EOF'
-Hub setup done. Next:
-  ymir add ~/.zshrc ~/.config/nvim   # define folders to distribute
-  ymir list
-  (then on each laptop)  ymir setup  ->  ymir sync
+Hub setup done. Publish what you want to share:
+  ymir share ~/.zshrc ~/.config/nvim
+  ymir shares
+Spokes will subscribe to these and choose where they land.
 EOF
   else
     if confirm "Install the launchd auto-sync agent now?" Y; then cmd_install_agent || true; fi
     cat >&2 <<'EOF'
-Spoke setup done. Next:
-  ymir status
-  ymir sync                          # pull managed paths from the hub
+Spoke setup done. Subscribe and pull:
+  ymir catalog                          # see what the hub shares
+  ymir add --to ~/.gitconfig work.gitconfig   # subscribe + choose where it lands
+  ymir sync
 EOF
   fi
 }
 
-cmd_add() {
+# --- commands: hub role (publish) ---------------------------------------
+cmd_share() {
   local force=0; [ "${1:-}" = "--force" ] && { force=1; shift; }
-  [ $# -ge 1 ] || die "usage: ymir add [--force] <path>..."
-  build_excludes
-  local in rel rb
-  rb="$(rsync_bin)"
-  for in in "$@"; do
-    rel="$(to_rel "$in")"
-    if is_secret "$rel" && [ "$force" -ne 1 ]; then
-      warn "refusing secret-looking path '$rel' (use --force to override): skipped"; continue
-    fi
-    # seed: if present locally but missing on hub, push it up once
-    if [ -e "$HOME/$rel" ]; then
-      if ! hub_exec "test -e \$HOME/$rel"; then
-        warn "seeding '$rel' -> hub"
-        case "$TRANSPORT" in
-          ssh)
-            hub_exec "mkdir -p \$HOME/$(dirname "$rel")"
-            "$rb" -a "${REX[@]}" -e "ssh $SSH_OPTS" "$HOME/$rel" "$HUB_USER@$HUB_HOST:$(dirname "$rel")/" ;;
-          local)
-            mkdir -p "$HUB_ROOT/$(dirname "$rel")"
-            "$rb" -a "${REX[@]}" "$HOME/$rel" "$HUB_ROOT/$(dirname "$rel")/" ;;
-        esac
-      fi
-    fi
-    # register in hub manifest (deduped)
-    hub_exec "mkdir -p \$HOME/.config/ymir; touch $REMOTE_MANIFEST; grep -qxF -- '$rel' $REMOTE_MANIFEST || printf '%s\n' '$rel' >> $REMOTE_MANIFEST"
-    printf 'added: %s\n' "$rel"
-  done
-}
-
-cmd_rm() {
-  [ $# -ge 1 ] || die "usage: ymir rm <path>..."
+  [ $# -ge 1 ] || die "usage: ymir share [--force] <path>..."
+  mkdir -p "$CFG_DIR"; touch "$CATALOG_FILE"
   local in rel
   for in in "$@"; do
     rel="$(to_rel "$in")"
-    hub_exec "test -f $REMOTE_MANIFEST && grep -vxF -- '$rel' $REMOTE_MANIFEST > $REMOTE_MANIFEST.tmp && mv $REMOTE_MANIFEST.tmp $REMOTE_MANIFEST || true"
-    printf 'removed from manifest (local copy kept): %s\n' "$rel"
+    if is_secret "$rel" && [ "$force" -ne 1 ]; then
+      warn "refusing secret-looking path '$rel' (use --force): skipped"; continue
+    fi
+    [ -e "$HOME/$rel" ] || warn "note: '$rel' does not exist on the hub yet"
+    grep -qxF -- "$rel" "$CATALOG_FILE" || printf '%s\n' "$rel" >> "$CATALOG_FILE"
+    echo "shared: $rel"
   done
 }
 
-cmd_list() {
-  local m; m="$(read_manifest || true)"
-  [ -n "$m" ] && printf '%s\n' "$m" || echo "(manifest empty)"
+cmd_unshare() {
+  [ $# -ge 1 ] || die "usage: ymir unshare <path>..."
+  local in rel
+  for in in "$@"; do
+    rel="$(to_rel "$in")"
+    if [ -f "$CATALOG_FILE" ]; then
+      grep -vxF -- "$rel" "$CATALOG_FILE" > "$CATALOG_FILE.tmp" 2>/dev/null || true
+      mv "$CATALOG_FILE.tmp" "$CATALOG_FILE"
+    fi
+    echo "unshared: $rel"
+  done
 }
 
-cmd_sync() {
+cmd_shares() {
+  local c; c="$(read_catalog)"
+  [ -n "$c" ] && printf '%s\n' "$c" || echo "(nothing shared)"
+}
+
+# --- commands: spoke role (subscribe) -----------------------------------
+cmd_subscribe() {
+  local to="" all=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to)  to="${2:-}"; shift 2 ;;
+      --all) all=1; shift ;;
+      --)    shift; break ;;
+      -*)    die "unknown flag: $1" ;;
+      *)     break ;;
+    esac
+  done
+  mkdir -p "$CFG_DIR"; touch "$SUBS_FILE"
+  local cat; cat="$(read_catalog 2>/dev/null || true)"
+  if [ "$all" = "1" ]; then
+    [ -n "$cat" ] || { warn "hub catalog is empty (nothing to subscribe to)"; return 0; }
+    local s
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      grep -qxF -- "$s" "$SUBS_FILE" || printf '%s\n' "$s" >> "$SUBS_FILE"
+      echo "subscribed: $s"
+    done <<< "$cat"
+    return 0
+  fi
+  [ $# -ge 1 ] || die "usage: ymir add [--to DEST] <share>...   |   ymir add --all"
+  if [ -n "$to" ]; then
+    [ $# -eq 1 ] || die "--to takes exactly one share"
+    local src dest line
+    src="$(to_rel "$1")"; dest="$(to_rel "$to")"
+    dest_ok "$dest" || die "unsafe destination (escapes home): $to"
+    line="$src -> $dest"
+    [ -n "$cat" ] && ! in_catalog "$cat" "$src" && warn "note: '$src' is not in the hub catalog yet"
+    grep -qxF -- "$line" "$SUBS_FILE" || printf '%s\n' "$line" >> "$SUBS_FILE"
+    echo "subscribed: $line"
+  else
+    local in src
+    for in in "$@"; do
+      src="$(to_rel "$in")"
+      [ -n "$cat" ] && ! in_catalog "$cat" "$src" && warn "note: '$src' is not in the hub catalog yet"
+      grep -qxF -- "$src" "$SUBS_FILE" || printf '%s\n' "$src" >> "$SUBS_FILE"
+      echo "subscribed: $src"
+    done
+  fi
+}
+
+cmd_unsubscribe() {
+  [ $# -ge 1 ] || die "usage: ymir rm <share>..."
+  [ -f "$SUBS_FILE" ] || { echo "no subscriptions"; return 0; }
+  local in src line tmp
+  for in in "$@"; do
+    src="$(to_rel "$in")"; tmp="$SUBS_FILE.tmp"; : > "$tmp"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      parse_entry "$line"
+      [ "$E_SRC" = "$src" ] || printf '%s\n' "$line" >> "$tmp"
+    done < "$SUBS_FILE"
+    mv "$tmp" "$SUBS_FILE"
+    echo "unsubscribed: $src"
+  done
+}
+
+cmd_list_subs() {
+  local subs line; subs="$(read_subs)"
+  [ -n "$subs" ] || { echo "(no subscriptions)"; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    parse_entry "$line"
+    if [ "$E_SRC" = "$E_DEST" ]; then echo "$E_SRC"; else echo "$E_SRC -> $E_DEST"; fi
+  done <<< "$subs"
+}
+
+cmd_catalog() {
+  local c; c="$(read_catalog)"
+  [ -n "$c" ] && printf '%s\n' "$c" || echo "(hub shares nothing, or is unreachable)"
+}
+
+cmd_publish() {
+  local as=""
+  [ "${1:-}" = "--as" ] && { as="${2:-}"; shift 2; }
+  [ $# -eq 1 ] || die "usage: ymir publish [--as SHARE] <localpath>"
   build_excludes
+  local rb lrel share suffix; rb="$(rsync_bin)"
+  lrel="$(to_rel "$1")"
+  if [ -n "$as" ]; then share="$(to_rel "$as")"; else share="$lrel"; fi
+  [ -e "$HOME/$lrel" ] || die "no such local path: $HOME/$lrel"
+  is_secret "$share" && die "refusing to publish secret-looking path: $share (rename or curate on the hub)"
+  [ -d "$HOME/$lrel" ] && suffix="/" || suffix=""
+  hub_exec "mkdir -p \$HOME/$(dirname "$share")"
+  case "$TRANSPORT" in
+    ssh)   "$rb" -a "${REX[@]}" -e "ssh $SSH_OPTS" "$HOME/$lrel$suffix" "$HUB_USER@$HUB_HOST:$share$suffix" ;;
+    local) mkdir -p "$HUB_ROOT/$(dirname "$share")"; "$rb" -a "${REX[@]}" "$HOME/$lrel$suffix" "$HUB_ROOT/$share$suffix" ;;
+  esac
+  hub_exec "mkdir -p \$HOME/.config/ymir; touch $REMOTE_CATALOG; grep -qxF -- '$share' $REMOTE_CATALOG || printf '%s\n' '$share' >> $REMOTE_CATALOG"
+  echo "published + shared: $share"
+}
+
+# --- commands: sync / status --------------------------------------------
+cmd_sync() {
   if [ "$IS_HUB" = "1" ]; then
     echo "This machine is the hub (source of truth). Nothing to pull."; return 0
   fi
-  local rb rel n=0 fail=0 delflag=() ; rb="$(rsync_bin)"
-  [ "$MIRROR" = "1" ] && delflag=(--delete)
+  build_excludes
+  hub_exec "echo ok" >/dev/null 2>&1 || die "hub unreachable ($HUB_USER@$HUB_HOST)"
+  local rb catalog subs line n=0 skip=0 fail=0; rb="$(rsync_bin)"
   local rpath=(); [ -n "$HUB_RSYNC_PATH" ] && rpath=(--rsync-path="$HUB_RSYNC_PATH")
-  local manifest; manifest="$(read_manifest)" || die "cannot read hub manifest (hub unreachable?)"
-  # cache manifest locally
-  printf '%s\n' "$manifest" > "$LOCAL_MANIFEST"
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    local isdir src dst
-    isdir="$(hub_exec "test -d \$HOME/$rel && echo 1 || echo 0")"
-    mkdir -p "$HOME/$(dirname "$rel")"
-    if [ "$isdir" = "1" ]; then src_suffix="/"; else src_suffix=""; fi
+  catalog="$(read_catalog)"
+  subs="$(read_subs)"
+  [ -n "$subs" ] || { echo "no subscriptions (try: ymir catalog; ymir add --to DEST SHARE)"; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    parse_entry "$line"
+    if ! dest_ok "$E_DEST"; then warn "unsafe destination skipped: $E_DEST"; skip=$((skip+1)); continue; fi
+    if ! in_catalog "$catalog" "$E_SRC"; then warn "not shared by hub, skipped: $E_SRC"; skip=$((skip+1)); continue; fi
+    local isdir suffix delflag=()
+    isdir="$(hub_exec "test -d \$HOME/$E_SRC && echo 1 || echo 0")"
+    [ "$isdir" = "1" ] && suffix="/" || suffix=""
+    [ "$MIRROR" = "1" ] && [ "$E_DEST" = "$E_SRC" ] && delflag=(--delete)
+    mkdir -p "$HOME/$(dirname "$E_DEST")"
     case "$TRANSPORT" in
       ssh)
         if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
-              "$HUB_USER@$HUB_HOST:$rel$src_suffix" "$HOME/$rel$src_suffix"; then
-          n=$((n+1)); else warn "sync failed: $rel"; fail=$((fail+1)); fi ;;
+              "$HUB_USER@$HUB_HOST:$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
+          n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
       local)
         if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" \
-              "$HUB_ROOT/$rel$src_suffix" "$HOME/$rel$src_suffix"; then
-          n=$((n+1)); else warn "sync failed: $rel"; fail=$((fail+1)); fi ;;
+              "$HUB_ROOT/$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
+          n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
     esac
-  done <<< "$manifest"
+  done <<< "$subs"
   date '+%Y-%m-%dT%H:%M:%S' > "$STATE_FILE"
-  log "sync ok=$n fail=$fail mirror=$MIRROR"
-  printf 'synced %d path(s), %d failed. mirror=%s\n' "$n" "$fail" "$MIRROR"
+  log "sync ok=$n skip=$skip fail=$fail mirror=$MIRROR"
+  printf 'synced %d, skipped %d, failed %d\n' "$n" "$skip" "$fail"
   [ "$fail" -eq 0 ]
 }
 
 cmd_status() {
   if [ "$IS_HUB" = "1" ]; then
     printf 'role:      HUB (%s) - source of truth\n' "$HUB_HOST"
+    local c; c="$(read_catalog 2>/dev/null | grep -c . || true)"
+    printf 'shared:    %s path(s)\n' "${c:-0}"
   else
     printf 'role:      spoke -> hub %s@%s (transport=%s)\n' "${HUB_USER:-?}" "$HUB_HOST" "$TRANSPORT"
     if hub_exec "echo ok" >/dev/null 2>&1; then echo "reachable: yes"; else echo "reachable: NO"; fi
+    local s; s="$(read_subs 2>/dev/null | grep -c . || true)"
+    printf 'subs:      %s\n' "${s:-0}"
+    [ -f "$STATE_FILE" ] && printf 'last sync: %s\n' "$(cat "$STATE_FILE")" || echo "last sync: never"
   fi
-  local c; c="$(read_manifest 2>/dev/null | grep -c . || true)"
-  printf 'managed:   %s path(s)\n' "${c:-0}"
-  [ -f "$STATE_FILE" ] && printf 'last sync: %s\n' "$(cat "$STATE_FILE")" || echo "last sync: never"
 }
 
+# --- commands: launchd ---------------------------------------------------
 cmd_install_agent() {
   local self plist label="com.ymir.sync"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
@@ -347,142 +475,149 @@ cmd_uninstall_agent() {
   echo "removed launchd agent"
 }
 
+# --- help ----------------------------------------------------------------
 usage() {
   cat <<'EOF'
-ymir - pull-sync a managed list of config paths from a hub over Tailscale.
+ymir - publish/subscribe config sync over Tailscale.
 
 USAGE
   ymir <command> [args]
   ymir <command> --help      detailed help for one command
   ymir help [command]        this overview, or help for a command
 
-COMMANDS
+SETUP
   setup                guided interactive setup (prereqs, config, PATH, agent)
   init                 write the config template (~/.config/ymir/config)
-  add [--force] PATH.. register path(s) in the hub manifest (seeds new ones up)
-  rm PATH..            unregister path(s); the local copy is kept
-  list                 show managed paths (from the hub manifest)
-  sync                 pull every managed path: hub -> this machine
-  status               hub reachability, managed count, last sync time
-  install-agent        install a launchd agent that runs `sync` on an interval
-  uninstall-agent      remove the launchd agent
-  help, --help, -h     show this overview
 
-MODEL
-  One-way pull. The hub (HUB_HOST) is the source of truth and
-  owns the manifest + canonical files. Paths are stored HOME-relative so different
-  local usernames map correctly. Files stay in place; secrets are excluded.
+HUB (source of truth - decides what is offered)
+  share [--force] PATH..   add path(s) to the hub's share catalog
+  unshare PATH..           remove path(s) from the catalog
+  shares                   show the catalog
 
-CONFIG   ~/.config/ymir/config   (run `ymir init` to create it)
-  HUB_HOST HUB_USER TRANSPORT MIRROR INTERVAL HUB_RSYNC_PATH
+SPOKE (decides what it pulls and where)
+  catalog                  show what the hub shares (alias: hub-ls)
+  add [--to DEST] SHARE..  subscribe to shared item(s); --to sets local placement
+  add --all                subscribe to everything shared (same paths)
+  rm SHARE..               unsubscribe
+  list                     show this spoke's subscriptions (SHARE -> DEST)
+  sync                     pull subscribed items: hub -> this machine
+  publish [--as SHARE] P   push a local path up to the hub and share it
 
-Full guide: docs/GUIDE.md in the ymir repo.
+COMMON
+  status                   role, reachability, counts, last sync
+  install-agent            launchd agent to run `sync` on an interval
+  uninstall-agent          remove the launchd agent
+  help, --help, -h         this overview
+
+NOTE
+  `add`/`rm`/`list` are role-aware: on the hub (IS_HUB=1) they act on the share
+  catalog; on a spoke they act on this machine's subscriptions.
+
+Full guide: docs/GUIDE.md
 EOF
 }
 
 help_topic() {
   case "$1" in
     setup) cat <<'EOF'
-ymir setup - guided interactive setup.
-
-  Walks you through everything: checks Tailscale + GNU rsync (offers to install
-  rsync), asks whether this machine is the HUB or a SPOKE. For a spoke it verifies
-  HUB_USER with a live SSH test and re-prompts until it connects, then writes
-  ~/.config/ymir/config, optionally symlinks `ymir` onto PATH, and optionally
-  installs the launchd agent.
-
-  Re-runnable; it asks before overwriting an existing config. Prompts fall back to
-  defaults when run non-interactively.
-
-  Example:
-    ymir setup
+ymir setup - guided interactive setup. Asks HUB or SPOKE, checks Tailscale + rsync,
+verifies the hub connection (spoke), writes ~/.config/ymir/config, links PATH, and can
+install the launchd agent. Re-runnable; falls back to defaults when non-interactive.
 EOF
 ;;
     init) cat <<'EOF'
-ymir init - write the config template.
-
-  Creates ~/.config/ymir/config with commented defaults if it does not exist.
-  Does NOT overwrite an existing config. After running it, set HUB_USER to the
-  hub's local macOS account name (run `id -un` on the hub to find it).
-
-  Example:
-    ymir init
-    $EDITOR ~/.config/ymir/config    # set HUB_USER="..."
-    ymir status
+ymir init - write ~/.config/ymir/config template (does not overwrite an existing one).
+Set IS_HUB=1 on the hub, or HUB_USER on a spoke.
 EOF
 ;;
-    add) cat <<'EOF'
-ymir add [--force] PATH...
+    share) cat <<'EOF'
+ymir share [--force] PATH...   (run on the HUB)
 
-  Register one or more paths in the hub manifest so they get synced. A path may be
-  absolute, ~-relative, or relative to the current directory. Paths under your home
-  are stored HOME-relative (e.g. ".config/nvim"); paths outside home are stored
-  absolute and will NOT remap across machines with different usernames.
+  Add path(s) to the hub's share catalog (~/.config/ymir/shares.list) so spokes may
+  subscribe to them. Paths are stored HOME-relative. Secret-looking paths are refused
+  unless --force. The file should exist on the hub (you get a note if it does not).
 
-  Seeding: if the path exists locally but not yet on the hub, its current content is
-  pushed up to the hub once, making the hub the source of truth from then on.
+  Example:  ymir share ~/.zshrc ~/.config/nvim
+EOF
+;;
+    unshare) cat <<'EOF'
+ymir unshare PATH...   (run on the HUB)
 
-  Secret guard: paths matching secret patterns (.ssh/*, id_rsa, *.pem, *.key,
-  .aws/credentials, *.env, ...) are refused. Use --force to add one anyway.
+  Remove path(s) from the catalog. Spokes can no longer pull them on the next sync.
+  Files are not deleted anywhere; only the catalog entry is removed.
+EOF
+;;
+    shares) cat <<'EOF'
+ymir shares   (run on the HUB)   -> prints the share catalog.
+EOF
+;;
+    catalog|hub-ls) cat <<'EOF'
+ymir catalog   (run on a SPOKE)
 
-  Run from any Mac: the manifest lives on the hub, so the managed set is shared.
+  Show what the hub currently shares, so you know which SHARE names you can subscribe
+  to with `ymir add`. Reads the hub catalog over Tailscale.
+EOF
+;;
+    add|subscribe) cat <<'EOF'
+ymir add [--to DEST] SHARE...      (SPOKE: subscribe)
+ymir add --all                     subscribe to everything shared (same paths)
+ymir share ... (on the HUB)        (add is role-aware; on the hub it shares)
+
+  On a SPOKE, `add` records a subscription in this machine's local list
+  (~/.config/ymir/paths.list). Each subscription is `SHARE -> DEST`:
+    - SHARE = a path the hub shares (see `ymir catalog`)
+    - DEST  = where it should land on THIS machine (--to); defaults to SHARE
+  DEST is validated to stay inside your home. Managing subscriptions is local (no hub
+  round trip) except catalog lookups.
 
   Examples:
-    ymir add ~/.zshrc ~/.config/nvim
-    ymir add ~/.config/ghostty          # a directory (synced recursively)
-    ymir add --force ~/.config/app/token.env
+    ymir add --to ~/.gitconfig work.gitconfig   # hub work.gitconfig -> my ~/.gitconfig
+    ymir add .config/nvim                        # same path
+    ymir add --all                               # take everything the hub shares
 EOF
 ;;
-    rm|remove) cat <<'EOF'
-ymir rm PATH...
+    rm|remove|unsubscribe) cat <<'EOF'
+ymir rm SHARE...   (SPOKE: unsubscribe; on the HUB it is unshare)
 
-  Remove path(s) from the hub manifest so they stop syncing. Your local copy and the
-  hub copy are BOTH left in place; only the manifest entry is deleted. Accepts the
-  same path forms as `add`.
-
-  Example:
-    ymir rm ~/.zshrc
+  Remove subscription(s) matching SHARE from this spoke's list. Local files are kept.
+  Matches by the SHARE (source) field, so `rm .a` never touches `.abc` or a mapping
+  where `.a` is only the destination.
 EOF
 ;;
     list|ls) cat <<'EOF'
-ymir list
-
-  Print the managed paths, read live from the hub manifest
-  (~/.config/ymir/paths.list on the hub). Requires the hub to be reachable.
+ymir list   -> on a SPOKE, this machine's subscriptions (SHARE -> DEST);
+               on the HUB, the share catalog.
 EOF
 ;;
     sync) cat <<'EOF'
-ymir sync
+ymir sync   (run on a SPOKE)
 
-  Pull every managed path from the hub to this machine with rsync. Directories are
-  synced recursively. Secret patterns are always excluded. Parent directories are
-  created as needed. Records the timestamp for `status` and logs to the config dir.
+  Pull each subscribed item from the hub to its chosen local destination. A subscription
+  is skipped (with a warning) if the hub no longer shares it, or if its destination
+  would escape your home. Secret patterns are always excluded. MIRROR=1 adds
+  `rsync --delete` only for same-path subscriptions (never for a remapped destination).
+  This is what the launchd agent runs.
+EOF
+;;
+    publish) cat <<'EOF'
+ymir publish [--as SHARE] LOCALPATH   (run on a SPOKE)
 
-  MIRROR=1 in the config adds `rsync --delete`, so files removed on the hub are also
-  deleted here (destructive). Default MIRROR=0 only adds/updates, never deletes.
-
-  This is the command the launchd agent runs on an interval.
+  Push a local file/dir up to the hub and add it to the share catalog in one step, so
+  you can curate from a laptop instead of editing on the hub. --as sets the catalog
+  name (defaults to the local path). Secret-looking paths are refused.
 EOF
 ;;
     status) cat <<'EOF'
-ymir status
-
-  Show the configured hub (user@host, transport), whether it is reachable, how many
-  paths are managed, and when the last sync ran.
+ymir status   -> role, hub reachability, share/subscription counts, last sync time.
 EOF
 ;;
     install-agent) cat <<'EOF'
-ymir install-agent
-
-  Write and load a launchd agent (~/Library/LaunchAgents/com.ymir.sync.plist) that
-  runs `ymir sync` at login and every INTERVAL seconds (default 300). Re-running it
-  reloads the agent with the current INTERVAL. Output goes to the ymir log.
+ymir install-agent   -> launchd agent that runs `ymir sync` at login and every INTERVAL
+seconds. Re-run to apply a new INTERVAL.
 EOF
 ;;
     uninstall-agent) cat <<'EOF'
-ymir uninstall-agent
-
-  Unload and delete the launchd agent. Does not touch your config or synced files.
+ymir uninstall-agent -> unload and delete the launchd agent. Config/files untouched.
 EOF
 ;;
     *) usage ;;
@@ -491,21 +626,26 @@ EOF
 
 main() {
   local sub="${1:-help}"; shift || true
-  # Per-command help must work without loading config (never die on unset HUB_USER).
   case "${1:-}" in -h|--help) help_topic "$sub"; exit 0 ;; esac
   case "$sub" in
-    setup)           cmd_setup "$@" ;;
-    init)            cmd_init "$@" ;;
-    add)             load_cfg; cmd_add "$@" ;;
-    rm|remove)       load_cfg; cmd_rm "$@" ;;
-    list|ls)         load_cfg; cmd_list "$@" ;;
-    sync)            load_cfg; cmd_sync "$@" ;;
-    status)          load_cfg; cmd_status "$@" ;;
-    install-agent)   load_cfg; cmd_install_agent "$@" ;;
-    uninstall-agent) cmd_uninstall_agent "$@" ;;
-    help)            [ $# -ge 1 ] && help_topic "$1" || usage ;;
-    -h|--help)       usage ;;
-    *)               usage; exit 1 ;;
+    setup)                 cmd_setup "$@" ;;
+    init)                  cmd_init "$@" ;;
+    add|subscribe)         load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_share "$@"; else cmd_subscribe "$@"; fi ;;
+    rm|remove|unsubscribe) load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_unshare "$@"; else cmd_unsubscribe "$@"; fi ;;
+    list|ls)               load_cfg; if [ "$IS_HUB" = "1" ]; then cmd_shares; else cmd_list_subs; fi ;;
+    share)                 load_cfg; [ "$IS_HUB" = "1" ] || die "run 'share' on the hub (IS_HUB=1)"; cmd_share "$@" ;;
+    unshare)               load_cfg; [ "$IS_HUB" = "1" ] || die "run 'unshare' on the hub (IS_HUB=1)"; cmd_unshare "$@" ;;
+    shares)                load_cfg; cmd_shares "$@" ;;
+    catalog|hub-ls)        load_cfg; cmd_catalog "$@" ;;
+    publish)               load_cfg; [ "$IS_HUB" = "1" ] && die "publish is for spokes; on the hub just place the file and 'ymir share'"; cmd_publish "$@" ;;
+    sync)                  load_cfg; cmd_sync "$@" ;;
+    status)                load_cfg; cmd_status "$@" ;;
+    install-agent)         load_cfg; cmd_install_agent "$@" ;;
+    uninstall-agent)       cmd_uninstall_agent "$@" ;;
+    help)                  [ $# -ge 1 ] && help_topic "$1" || usage ;;
+    -h|--help)             usage ;;
+    *)                     usage; exit 1 ;;
   esac
 }
-main "$@"
+
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then main "$@"; fi

@@ -4,8 +4,8 @@ Objective: the HUB decides what to share (source of truth + share catalog); each
 decides which shared items it pulls and WHERE they land locally. The hub needs no
 knowledge of the spokes.
 
-Status: DESIGN (pub/sub model, confirmed with user)
-Mode: git present (origin github.com/sgtkuncoro/ymir, `main`). One commit per step.
+Status: IMPLEMENTED (pub/sub model shipped in bin/ymir; see docs/GUIDE.md).
+Mode: git present, default branch `main`. One commit per step.
 
 ---
 

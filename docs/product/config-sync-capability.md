@@ -1,6 +1,7 @@
 # Capability: Sync/Mirror Config Paths Across the Tailnet
 
-Status: IMPLEMENTED (one-way pull via rsync). Tool: bin/ymir. Pending: set HUB_USER.
+Status: IMPLEMENTED as publish/subscribe (hub shares a catalog; each spoke subscribes and
+chooses local placement via `--to`). Tool: bin/ymir. See docs/GUIDE.md.
 Date: 2026-07-17
 Owner: (you)
 

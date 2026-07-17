@@ -1,75 +1,88 @@
 # ymir
 
-Pull-sync a **managed, add/removable list** of config paths from one hub to your other
-Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
+Publish/subscribe config sync across your Macs, entirely over your Tailscale tailnet.
+No cloud, no public exposure.
 
-> Full documentation: [docs/GUIDE.md](docs/GUIDE.md) - concepts, internals, every command, automation, security, troubleshooting, FAQ.
+> Full documentation: [docs/GUIDE.md](docs/GUIDE.md) - model, internals, every command, automation, security, troubleshooting, FAQ.
 
-- **Hub** is the source of truth: it owns the manifest and canonical files.
-- **Spokes** pull the manifest and every listed path from the hub.
-- Paths are stored **HOME-relative**, so different local usernames map correctly
-  (hub user `alice` vs laptop user `bob` -> `/Users/alice/.zshrc` <-> `/Users/bob/.zshrc`).
+- **Hub** = source of truth. It publishes a **share catalog**: the paths it offers.
+- **Spoke** = each other Mac. It **subscribes** to shared items and decides **where**
+  each one lands locally (`--to`). The hub needs no knowledge of the spokes.
+- A spoke can only pull what the hub currently shares (the hub is the gatekeeper).
+- Paths are stored **HOME-relative**, so different local usernames map correctly.
 - Files stay **in place** (no symlinks). **Secrets excluded by default.**
 - Transport is `ssh` over Tailscale SSH (enable on the hub with `sudo tailscale set --ssh`).
 
 ## Install
 
-Fastest path is the guided wizard:
+Guided wizard (recommended):
 
 ```sh
 brew install rsync                 # GNU rsync (once)
 ./bin/ymir setup                   # asks hub/spoke, writes config, links PATH, agent
 ```
 
-`ymir setup` checks prerequisites, asks whether this machine is the HUB or a SPOKE,
-collects `HUB_HOST`/`HUB_USER`, writes `~/.config/ymir/config`, offers to symlink
-`ymir` onto your PATH, verifies the hub connection (spoke), and can install the launchd agent.
-
-Manual equivalent, if you prefer:
+Manual:
 
 ```sh
-ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # PATH
-ymir init                                          # writes ~/.config/ymir/config
-$EDITOR ~/.config/ymir/config                      # set HUB_USER (run `id -un` on hub)
-ymir status                                         # expect: reachable: yes
+ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir
+ymir init
+$EDITOR ~/.config/ymir/config      # hub: IS_HUB=1   |   spoke: HUB_USER=<id -un on hub>
+ymir status
 ```
 
 ## Use
 
+### On the hub (decide what to share)
 ```sh
-ymir add ~/.zshrc ~/.config/nvim   # register (seeds up to hub if new)
-ymir add --force ~/.somesecret     # override the secret guard (rare)
-ymir rm  ~/.zshrc                  # unregister (local copy kept)
-ymir list                         # show managed paths
-ymir sync                         # pull hub -> this machine now
-ymir install-agent                # launchd: auto-sync every INTERVAL seconds
-ymir uninstall-agent
+ymir share ~/.zshrc ~/.config/nvim ~/work.gitconfig
+ymir shares
+ymir unshare ~/.zshrc
 ```
 
-Run `ymir add/rm` on any Mac; because the manifest lives on the hub, the managed set is
-shared. Other spokes pick up the change on their next `sync`.
+### On each spoke (decide what you pull and where)
+```sh
+ymir catalog                                  # see what the hub offers
+ymir add ~/.config/nvim                       # subscribe, same path
+ymir add --to ~/.gitconfig work.gitconfig     # subscribe + place at a different path
+ymir add --all                                # subscribe to everything shared
+ymir list                                     # your subscriptions (SHARE -> DEST)
+ymir sync                                      # pull them down
+ymir install-agent                            # auto-sync on an interval
+```
+
+`add`/`rm`/`list` are role-aware: on the hub they act on the **share catalog**; on a
+spoke they act on that spoke's **subscriptions**. Optional: `ymir publish ~/file` pushes
+a local file up to the hub and shares it in one step.
 
 ## Config (`~/.config/ymir/config`)
 
 | Key | Meaning |
 |-----|---------|
 | `HUB_HOST` | hub Tailscale MagicDNS name |
-| `HUB_USER` | **required** local macOS username on the hub |
-| `IS_HUB` | set `1` on the hub to curate paths there (`sync` becomes a no-op) |
+| `HUB_USER` | spoke only: local macOS username on the hub |
+| `IS_HUB` | set `1` on the hub (publish/share here; `sync` is a no-op) |
 | `TRANSPORT` | `ssh` (real) or `local` (testing) |
-| `MIRROR` | `1` => `rsync --delete` (removes local files gone on hub); default `0` |
-| `INTERVAL` | launchd sync interval in seconds |
+| `MIRROR` | `1` => `rsync --delete`, applied only to same-path subscriptions |
+| `INTERVAL` | launchd auto-sync interval (seconds) |
 | `HUB_RSYNC_PATH` | set to `/opt/homebrew/bin/rsync` if the hub has GNU rsync |
 
 ## Safety
 
-- One-way pull: **edits on a spoke are overwritten** by the hub on the next sync. Curate
-  config on the hub.
-- `MIRROR=1` is destructive on the receiver. Leave it `0` unless you want exact mirroring.
+- One-way pull: the hub is authoritative. A spoke cannot pull a path the hub does not share.
+- A subscription destination cannot escape your home (`..` / absolute are rejected).
+- `MIRROR=1` never deletes for a remapped destination, so it cannot wipe a shared parent
+  like `~/.config`.
 - Secret patterns (`.ssh/*`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials`, `.env`, ...)
-  are excluded from every transfer and blocked by `add` without `--force`.
+  are excluded from every transfer and blocked by `share`/`publish` without `--force`.
+
+## Tests
+
+```sh
+bash tests/parse.sh      # parser + destination-safety unit tests
+```
 
 ## Scope
 
-Macs only. iOS nodes (iPad/iPhone) cannot run the sync agent; use them read-only via a
+Macs only. iOS nodes (iPad/iPhone) cannot run the agent; use them read-only via a
 Tailscale file client if needed.
