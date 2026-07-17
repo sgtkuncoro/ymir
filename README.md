@@ -5,12 +5,12 @@ Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
 
 > Full documentation: [docs/GUIDE.md](docs/GUIDE.md) - concepts, internals, every command, automation, security, troubleshooting, FAQ.
 
-- **Hub** (`macminim4`) is the source of truth: it owns the manifest and canonical files.
+- **Hub** is the source of truth: it owns the manifest and canonical files.
 - **Spokes** pull the manifest and every listed path from the hub.
 - Paths are stored **HOME-relative**, so different local usernames map correctly
-  (hub `sk...` vs laptop `sky0` -> `/Users/sk.../.zshrc` <-> `/Users/sky0/.zshrc`).
+  (hub user `alice` vs laptop user `bob` -> `/Users/alice/.zshrc` <-> `/Users/bob/.zshrc`).
 - Files stay **in place** (no symlinks). **Secrets excluded by default.**
-- Transport is `ssh` over Tailscale SSH (already enabled on the hub).
+- Transport is `ssh` over Tailscale SSH (enable on the hub with `sudo tailscale set --ssh`).
 
 ## Install
 
@@ -53,7 +53,7 @@ shared. Other spokes pick up the change on their next `sync`.
 
 | Key | Meaning |
 |-----|---------|
-| `HUB_HOST` | hub MagicDNS name (default `macminim4`) |
+| `HUB_HOST` | hub Tailscale MagicDNS name |
 | `HUB_USER` | **required** local macOS username on the hub |
 | `IS_HUB` | set `1` on the hub to curate paths there (`sync` becomes a no-op) |
 | `TRANSPORT` | `ssh` (real) or `local` (testing) |
@@ -64,7 +64,7 @@ shared. Other spokes pick up the change on their next `sync`.
 ## Safety
 
 - One-way pull: **edits on a spoke are overwritten** by the hub on the next sync. Curate
-  config on the hub (`macminim4`).
+  config on the hub.
 - `MIRROR=1` is destructive on the receiver. Leave it `0` unless you want exact mirroring.
 - Secret patterns (`.ssh/*`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials`, `.env`, ...)
   are excluded from every transfer and blocked by `add` without `--force`.

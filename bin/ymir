@@ -4,8 +4,8 @@
 #
 # Model: one-way PULL from a single hub (source of truth) to this machine.
 #   - The hub owns the manifest (~/.config/ymir/paths.list) and the canonical files.
-#   - Paths are stored HOME-relative, so a hub user (e.g. "sk") and a local user
-#     (e.g. "sky0") map correctly even though /Users/<name> differs.
+#   - Paths are stored HOME-relative, so a hub user (e.g. "alice") and a local user
+#     (e.g. "bob") map correctly even though /Users/<name> differs.
 #   - `add`/`rm`/`list` edit the hub manifest. `sync` pulls hub -> local.
 #   - Files are kept in place (no symlinks). Secrets are excluded by default.
 #
@@ -21,7 +21,7 @@ STATE_FILE="$CFG_DIR/last-sync"
 LOG_FILE="${YMIR_LOG:-$CFG_DIR/ymir.log}"
 
 # --- defaults (overridable in $CFG_FILE) ---------------------------------
-HUB_HOST="macminim4"
+HUB_HOST="hub"          # your hub's Tailscale MagicDNS name (override in config)
 HUB_USER=""              # REQUIRED: local macOS username on the hub
 TRANSPORT="ssh"         # ssh | local
 HUB_ROOT=""             # only for TRANSPORT=local: path acting as hub $HOME
@@ -128,9 +128,9 @@ cmd_init() {
   if [ -f "$CFG_FILE" ]; then warn "config already exists at $CFG_FILE"; return; fi
   cat >"$CFG_FILE" <<EOF
 # ymir config ($(hostname))
-HUB_HOST="macminim4"     # hub MagicDNS name (Tailscale)
+HUB_HOST="hub"           # your hub's Tailscale MagicDNS name
 HUB_USER=""              # REQUIRED: run 'id -un' on the hub and paste it here
-IS_HUB="0"               # set to 1 ON THE HUB (macminim4) to curate paths there directly
+IS_HUB="0"               # set to 1 ON THE HUB to curate paths there directly
 TRANSPORT="ssh"          # ssh | local
 MIRROR="0"               # 1 => delete files on this machine that are gone on the hub
 INTERVAL="300"           # launchd sync interval (seconds)
@@ -369,7 +369,7 @@ COMMANDS
   help, --help, -h     show this overview
 
 MODEL
-  One-way pull. The hub (HUB_HOST, default macminim4) is the source of truth and
+  One-way pull. The hub (HUB_HOST) is the source of truth and
   owns the manifest + canonical files. Paths are stored HOME-relative so different
   local usernames map correctly. Files stay in place; secrets are excluded.
 

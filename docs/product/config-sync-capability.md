@@ -2,7 +2,7 @@
 
 Status: IMPLEMENTED (one-way pull via rsync). Tool: bin/ymir. Pending: set HUB_USER.
 Date: 2026-07-17
-Owner: sgtkuncoro
+Owner: (you)
 
 ## CAPABILITY
 
@@ -36,28 +36,28 @@ Underlying engine is chosen by direction (see OPEN QUESTIONS Q2):
 - true 2-way multi-writer -> Unison invoked once per manifest root, or Syncthing with
   the wrapper calling its REST API to create/remove a shared folder per path.
 
-## ENVIRONMENT (observed, not assumed)
+## ENVIRONMENT (assumed)
 
-Tailnet `tail00e4e9.ts.net`, all one user (`sgtkuncoro@`):
+A personal Apple tailnet under a single user account:
 
-| Node          | Tailscale IP     | OS     | Role for sync            |
-|---------------|------------------|--------|--------------------------|
-| mbpm1-1       | 100.102.93.23    | macOS  | this machine (laptop)    |
-| macminim4     | 100.70.182.106   | macOS  | always-on hub candidate  |
-| mbpm1         | 100.93.89.46     | macOS  | laptop                   |
-| ipad-mini     | 100.78.35.52     | iOS    | read/consume only        |
-| iphone-12-mini| 100.70.251.0     | iOS    | read/consume only        |
+| Node       | OS     | Role for sync            |
+|------------|--------|--------------------------|
+| laptop-a   | macOS  | spoke (this machine)     |
+| hub        | macOS  | always-on hub candidate  |
+| laptop-b   | macOS  | spoke                    |
+| tablet     | iOS    | read/consume only        |
+| phone      | iOS    | read/consume only        |
 
 Facts that constrain the design:
-- Tailscale 1.98.9 up; Funnel currently enabled on this node.
-- Tailscale SSH is OFF (`RunSSH: false`). Any SSH-based option needs it enabled, or
-  macOS Remote Login enabled, on the target node(s).
-- `brew` present at `/opt/homebrew` (Apple Silicon) -> installing tools is easy.
+- Tailscale up on all nodes. Do not point Funnel at synced paths.
+- Tailscale SSH may be OFF by default. Any SSH-based option needs it enabled
+  (`sudo tailscale set --ssh`), or macOS Remote Login enabled, on the target node(s).
+- `brew` on Apple Silicon lives at `/opt/homebrew` -> installing tools is easy.
 - System `rsync` is Apple **openrsync** (protocol 29), missing many GNU rsync 3.x
   flags. For scripted mirroring install GNU rsync: `brew install rsync`.
 - iOS nodes cannot run Syncthing/Unison/rsync as background daemons. They can only
   participate via on-demand apps (Mobius Sync for Syncthing, Working Copy, a WebDAV
-  client for Taildrive). Treat iPad/iPhone as read/consume endpoints, not sync peers.
+  client for Taildrive). Treat tablet/phone as read/consume endpoints, not sync peers.
 
 ## CONSTRAINTS (fixed rules and boundaries)
 
@@ -113,20 +113,20 @@ with one of these:
 Split by data type instead of forcing one tool:
 
 1. Dotfiles / shell / editor / tool config that varies per host -> **D. chezmoi + git**,
-   with the bare repo on `macminim4` reached over the tailnet.
+   with the bare repo on the hub reached over the tailnet.
 2. Bulk "keep these folders identical" config (e.g. an app's settings dir, notes, a
    project config tree) -> **A. Syncthing** bound to Tailscale IPs, Macs only.
 3. If you prefer explicit control over a small, high-value config set and want conflict
    review -> **B. Unison + Tailscale SSH + launchd** instead of Syncthing.
 
-`macminim4` (always-on Mac mini) is the natural hub / source-of-truth for options B, C, D.
+The always-on Mac (the hub) is the natural source-of-truth for options B, C, D.
 
 ## IMPLEMENTATION CONTRACT
 
 Actors
 - Operator (you): defines which paths sync and the per-path policy.
-- Hub node `macminim4`: canonical store / git remote / rsync source.
-- Spoke Macs `mbpm1`, `mbpm1-1`: sync peers.
+- Hub node (always-on Mac): canonical store / git remote / rsync source.
+- Spoke Macs (laptops): sync peers.
 - iOS nodes: consume-only, out of automated scope.
 
 Surfaces
@@ -167,7 +167,7 @@ Observability / operator requirements
    Unison/Syncthing.
 3. Are any target paths identical-everywhere or do they need per-host values? Determines
    chezmoi vs raw mirror.
-4. OK to enable Tailscale SSH on `macminim4`/`mbpm1` (needed for B and C)?
+4. OK to enable Tailscale SSH on the hub / spokes (needed for B and C)?
 5. Any secrets inside the chosen paths that must be excluded or vaulted?
 
 ## HANDOFF

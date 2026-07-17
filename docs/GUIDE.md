@@ -37,7 +37,7 @@ conflict logic and no chance of a stale laptop overwriting good config.
 
 | Term | Meaning |
 |------|---------|
-| **Hub** | The one machine that owns the truth. Default `macminim4`. Holds the manifest and the canonical copy of every managed path. |
+| **Hub** | The one machine you designate as the source of truth. Holds the manifest and the canonical copy of every managed path. |
 | **Spoke** | Any other Mac that pulls from the hub. Your laptops. |
 | **Manifest** | `~/.config/ymir/paths.list` **on the hub**. One managed path per line. This is the add/removable list. |
 | **Managed path** | A file or directory registered in the manifest and therefore synced. |
@@ -50,9 +50,9 @@ conflict logic and no chance of a stale laptop overwriting good config.
 ```mermaid
 flowchart LR
   subgraph Tailnet [Tailscale tailnet]
-    HUB[(macminim4 - HUB\nmanifest + canonical files)]
-    A[mbpm1-1 laptop - spoke]
-    B[mbpm1 laptop - spoke]
+    HUB[(hub - HUB\nmanifest + canonical files)]
+    A[laptop-a - spoke]
+    B[laptop-b - spoke]
   end
   HUB -- rsync pull --> A
   HUB -- rsync pull --> B
@@ -84,7 +84,7 @@ Every path you pass is normalised:
    Otherwise it is stored **absolute** (and will not remap across users - you get warned
    in the docs, not silently).
 
-This is why the hub account (`sk...`) and the laptop account (`sky0`) can both resolve
+This is why the hub account (`alice`) and the laptop account (`bob`) can both resolve
 `.zshrc` to their own `/Users/<name>/.zshrc`.
 
 ### `add` algorithm
@@ -126,8 +126,8 @@ That is what makes the tool testable without a hub (see [section 12](#12-testing
 ## 4. Requirements
 
 - **Tailscale** on hub and spokes, all logged into the same tailnet.
-- **Tailscale SSH enabled on the hub**: `sudo tailscale set --ssh` (already on for
-  `macminim4`). This lets spokes SSH in using Tailscale identity - no SSH keys to manage.
+- **Tailscale SSH enabled on the hub**: `sudo tailscale set --ssh`.
+  This lets spokes SSH in using Tailscale identity - no SSH keys to manage.
 - **GNU rsync** on the spoke: `brew install rsync` (installs `/opt/homebrew/bin/rsync`).
   ymir auto-prefers it over macOS's limited `openrsync`.
 - The hub's local macOS **account name** (run `id -un` on the hub) for `HUB_USER`.
@@ -163,7 +163,7 @@ File: `~/.config/ymir/config` (plain shell, sourced by ymir).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `HUB_HOST` | `macminim4` | Hub MagicDNS name or Tailscale IP. |
+| `HUB_HOST` | `hub` | Hub MagicDNS name or Tailscale IP. |
 | `HUB_USER` | *(empty)* | **Required.** Local macOS username on the hub. |
 | `IS_HUB` | `0` | Set to `1` on the hub itself: `add`/`rm`/`list` edit the local manifest, `sync` is a no-op. |
 | `TRANSPORT` | `ssh` | `ssh` for real use; `local` for tests (needs `HUB_ROOT`). |
@@ -237,19 +237,19 @@ Overview, or detailed help for one command.
 ### Defining which folders on the hub get distributed
 
 A managed path is just an entry in the hub manifest whose content lives at that
-HOME-relative location **on the hub** (`macminim4`). You define one in either place:
+HOME-relative location **on the hub**. You define one in either place:
 
 **On the hub itself (recommended for curating).** Set `IS_HUB="1"` in
-`~/.config/ymir/config` on `macminim4`, then add real folders/files that live there.
+`~/.config/ymir/config` on the hub, then add real folders/files that live there.
 In hub mode ymir edits the local manifest directly (no SSH, no seeding) and `sync`
 is a no-op because the hub is the source:
 ```sh
-# on macminim4
+# on the hub
 ymir init
 $EDITOR ~/.config/ymir/config       # set IS_HUB="1"
 ymir add ~/.config/nvim ~/Documents/dotfiles ~/.zshrc
 ymir list
-ymir status                         # role: HUB (macminim4) - source of truth
+ymir status                         # role: HUB - source of truth
 ```
 Then on each spoke: `ymir sync` pulls those exact paths down.
 
@@ -261,7 +261,7 @@ which the hub owns it.
 Either way the manifest is shared, so the folder is "defined" once and every spoke
 receives it. Remove one with `ymir rm ~/path`.
 
-### First-time setup (hub is `macminim4`, you are on a laptop)
+### First-time setup (you are on a laptop; the hub is your always-on Mac)
 ```sh
 ymir init
 $EDITOR ~/.config/ymir/config      # HUB_USER="<id -un on hub>"
@@ -283,7 +283,7 @@ ymir rm ~/.config/nvim
 ```
 
 ### Change config that is under management
-Edit it **on the hub** (`macminim4`). On a spoke, edits are overwritten by the next
+Edit it **on the hub**. On a spoke, edits are overwritten by the next
 `sync`. If you must edit on a spoke, do it, then run `ymir add` again is not needed -
 instead copy up manually or switch to a two-way engine (see FAQ).
 
