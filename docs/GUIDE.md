@@ -249,10 +249,24 @@ ymir uninstall-agent
 
 Logs: `tail -n 50 ~/.config/ymir/ymir.log`; peers: `tailscale status`.
 
-## 12. Testing without a hub
+## 12. Testing and CI
 
-The `local` transport treats a directory as a fake hub. See `tests/parse.sh` for parser
-unit tests, and this end-to-end shape:
+The repo ships two test scripts (dependency-free: bash + rsync + coreutils):
+
+```sh
+bash tests/parse.sh    # unit tests for parse_entry / dest_ok
+bash tests/run.sh      # behavior tests: full hub/spoke flows over the local transport
+```
+
+`tests/run.sh` uses the `local` transport (a directory stands in for the hub's `$HOME`),
+so it exercises pub/sub, `--to` mapping, directory sync, catalog gatekeeping, MIRROR
+delete-gating safety, the secret guard, and role gating with no network. Output is TAP-ish
+and the script exits nonzero if any assertion fails.
+
+CI (`.github/workflows/ci.yml`) runs both scripts plus `shellcheck -S warning` on
+`ubuntu-latest` and `macos-latest` for every push and pull request.
+
+A minimal manual end-to-end shape, if you want to poke at it by hand:
 ```sh
 R=/tmp/ymir-t; rm -rf "$R"; HB="$R/hub"; SP="$R/spoke"; mkdir -p "$HB/.config/ymir" "$SP/.config/ymir"
 echo zrc > "$HB/.zshrc"

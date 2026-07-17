@@ -75,13 +75,17 @@ publishes it in one step.
 - `MIRROR=1` never deletes for a remapped destination, so it cannot wipe a shared parent
   like `~/.config`.
 - Secret patterns (`.ssh/*`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials`, `.env`, ...)
-  are excluded from every transfer and blocked by `share`/`publish` without `--force`.
+  are excluded from every transfer and blocked by `pub`/`push` without `--force`.
 
 ## Tests
 
 ```sh
-bash tests/parse.sh      # parser + destination-safety unit tests
+bash tests/parse.sh    # unit tests: parse_entry / dest_ok
+bash tests/run.sh      # behavior tests: full hub/spoke flows over the local transport
 ```
+
+Both run in CI (GitHub Actions, `.github/workflows/ci.yml`) on Linux and macOS, along
+with `shellcheck -S warning`, on every push and pull request.
 
 ## Scope
 
