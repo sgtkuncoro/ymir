@@ -142,6 +142,19 @@ t_mirror_samepath_delete() {
   assert_absent "same-path stale pruned" "$SPOKEH/share/stale.txt"
 }
 
+t_sync_excludes_volatile() {
+  setup_case
+  mkdir -p "$HUBH/dbdir"
+  echo DB  > "$HUBH/dbdir/app.db"
+  echo WAL > "$HUBH/dbdir/app.db-wal"
+  echo SHM > "$HUBH/dbdir/app.db-shm"
+  must hub pub dbdir; must spoke sub dbdir
+  run spoke sync; assert_rc "sync volatile rc" 0 "$RC"
+  assert_file_eq "db copied" "$SPOKEH/dbdir/app.db" "DB"
+  assert_absent "wal sidecar excluded" "$SPOKEH/dbdir/app.db-wal"
+  assert_absent "shm sidecar excluded" "$SPOKEH/dbdir/app.db-shm"
+}
+
 t_unsub_src_only() {
   setup_case
   printf '%s\n' '.a -> .b' '.abc' '.x -> .a' > "$(SP_SUBS)"
@@ -187,7 +200,8 @@ t_role_sub_on_hub() {
 # ---- driver -------------------------------------------------------------
 for t in t_pub_secret_pubs t_sub_plain t_sub_map t_sub_all t_sub_unsafe_dest \
          t_sub_mix_guard t_sync_plain t_sync_map t_sync_dir t_sync_gate \
-         t_mirror_remap_safe t_mirror_samepath_delete t_unsub_src_only t_push \
+         t_mirror_remap_safe t_mirror_samepath_delete t_sync_excludes_volatile \
+         t_unsub_src_only t_push \
          t_alias_add_hub t_alias_add_spoke t_role_pub_on_spoke t_role_sub_on_hub; do
   if ! "$t"; then FAILS=$((FAILS+1)); printf 'not ok - %s (test function crashed)\n' "$t"; fi
   teardown_case

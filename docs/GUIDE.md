@@ -288,6 +288,13 @@ cat "$SP/.zshrc-copy"     # -> zrc
 - Paths may not contain spaces, ` -> `, ` @`, or single quotes (config paths in practice
   do not). A legacy line containing ` -> ` would be reparsed as a mapping.
 - A directory subscription uses rsync contents-merge semantics (`dir/ -> other/`).
+- **Do not sync live databases or app runtime state.** ymir auto-excludes SQLite
+  sidecars (`*-wal`, `*-shm`, `*.db-journal`, `*.lock`) from every transfer, because
+  copying them corrupts the destination DB (SQLite then reports `disk I/O error`). But a
+  bare `.db` copied while its app is writing can still be stale, and overwriting a DB
+  that a running app holds open will break that app. Sync **config**, not live state.
+  For example, share an app's `config.yml`/`rules/`/`skills/`, not its `*.db` files,
+  `sessions/`, or other runtime dirs. If you must move a database, stop the app first.
 
 ## 14. FAQ
 

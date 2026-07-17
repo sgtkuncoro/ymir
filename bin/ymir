@@ -40,6 +40,12 @@ SECRET_PATTERNS=(
   "*.keychain*" ".aws/credentials" ".gnupg/*" ".netrc" "*.env" ".env"
 )
 
+# Volatile runtime files that must NEVER cross machines (copying an open SQLite DB's
+# WAL/SHM sidecars corrupts the copy -> "disk I/O error"). Excluded from every transfer.
+VOLATILE_PATTERNS=(
+  "*-wal" "*-shm" "*.db-journal" "*.sqlite-journal" "*.sqlite-wal" "*.sqlite-shm" "*.lock"
+)
+
 REMOTE_CATALOG='$HOME/.config/ymir/shares.list'   # expanded on the hub
 
 # --- helpers -------------------------------------------------------------
@@ -90,7 +96,8 @@ rsync_bin() { command -v /opt/homebrew/bin/rsync >/dev/null 2>&1 && echo /opt/ho
 build_excludes() {
   REX=()
   local p
-  for p in "${SECRET_PATTERNS[@]}"; do REX+=(--exclude="$p"); done
+  for p in "${SECRET_PATTERNS[@]}"   ; do REX+=(--exclude="$p"); done
+  for p in "${VOLATILE_PATTERNS[@]}" ; do REX+=(--exclude="$p"); done
 }
 
 # Trim surrounding whitespace (incl trailing \r from CRLF).
