@@ -155,6 +155,26 @@ t_sync_excludes_volatile() {
   assert_absent "shm sidecar excluded" "$SPOKEH/dbdir/app.db-shm"
 }
 
+t_sync_backup() {
+  setup_case
+  # distinct lengths so rsync always detects a change (size differs)
+  echo new-hub-content > "$HUBH/.zshrc"; must hub pub .zshrc; must spoke sub .zshrc
+  echo old > "$SPOKEH/.zshrc"                    # existing dest the sync will overwrite
+  run spoke sync; assert_rc "backup sync rc" 0 "$RC"
+  assert_file_eq "dest updated to new" "$SPOKEH/.zshrc" "new-hub-content"
+  local bkp; bkp="$(find "$SPOKEH/.config/ymir/backups" -type f -name .zshrc 2>/dev/null | head -1)"
+  assert_file_eq "backup holds old content" "$bkp" "old"
+}
+
+t_sync_backup_off() {
+  setup_case 'BACKUP="0"'
+  echo new-hub-content > "$HUBH/.zshrc"; must hub pub .zshrc; must spoke sub .zshrc
+  echo old > "$SPOKEH/.zshrc"
+  run spoke sync; assert_rc "backup-off sync rc" 0 "$RC"
+  assert_file_eq "dest updated (backup off)" "$SPOKEH/.zshrc" "new-hub-content"
+  assert_absent "no backups dir when off" "$SPOKEH/.config/ymir/backups"
+}
+
 t_unsub_src_only() {
   setup_case
   printf '%s\n' '.a -> .b' '.abc' '.x -> .a' > "$(SP_SUBS)"
@@ -201,7 +221,7 @@ t_role_sub_on_hub() {
 for t in t_pub_secret_pubs t_sub_plain t_sub_map t_sub_all t_sub_unsafe_dest \
          t_sub_mix_guard t_sync_plain t_sync_map t_sync_dir t_sync_gate \
          t_mirror_remap_safe t_mirror_samepath_delete t_sync_excludes_volatile \
-         t_unsub_src_only t_push \
+         t_sync_backup t_sync_backup_off t_unsub_src_only t_push \
          t_alias_add_hub t_alias_add_spoke t_role_pub_on_spoke t_role_sub_on_hub; do
   if ! "$t"; then FAILS=$((FAILS+1)); printf 'not ok - %s (test function crashed)\n' "$t"; fi
   teardown_case

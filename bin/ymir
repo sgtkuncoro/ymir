@@ -32,6 +32,8 @@ IS_HUB="0"              # 1 => THIS machine is the hub (publish here; sync is a 
 MIRROR="0"              # 1 => rsync --delete (only when DEST==SHARE)
 INTERVAL="300"          # launchd StartInterval seconds
 HUB_RSYNC_PATH=""       # optional --rsync-path for the hub (e.g. /opt/homebrew/bin/rsync)
+BACKUP="1"              # 1 => back up every file a sync overwrites/deletes
+KEEP_BACKUPS="10"       # how many timestamped backup sets to retain
 SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
 
 # Secret patterns excluded from every transfer AND blocked by share/publish (--force).
@@ -201,6 +203,8 @@ TRANSPORT="ssh"          # ssh | local
 MIRROR="0"               # 1 => delete local files gone on the hub (only for same-path)
 INTERVAL="300"           # launchd sync interval (seconds)
 HUB_RSYNC_PATH=""        # e.g. /opt/homebrew/bin/rsync if the hub has GNU rsync
+BACKUP="1"               # 1 => back up files a sync overwrites/deletes (recoverable)
+KEEP_BACKUPS="10"        # how many timestamped backup sets to retain
 EOF
   printf 'Wrote %s\nEdit it (HUB_USER on a spoke, or IS_HUB=1 on the hub), then: ymir status\n' "$CFG_FILE"
 }
@@ -256,6 +260,8 @@ TRANSPORT="ssh"
 MIRROR="0"
 INTERVAL="300"
 HUB_RSYNC_PATH="$rsyncpath"
+BACKUP="1"
+KEEP_BACKUPS="10"
 EOF
     echo "[ok] wrote $CFG_FILE" >&2
   fi
@@ -418,6 +424,19 @@ cmd_publish() {
   echo "pushed + published: $share"
 }
 
+# Remove the just-created set if empty, then cap retained sets to KEEP_BACKUPS.
+prune_backups() {
+  local just="$1" root="$CFG_DIR/backups" d
+  [ -d "$just" ] && find "$just" -depth -type d -empty -delete 2>/dev/null || true
+  [ -d "$root" ] || return 0
+  local -a sets=()
+  for d in "$root"/*/; do [ -d "$d" ] && sets+=("$d"); done
+  local total=${#sets[@]} excess i=0
+  [ "$total" -gt "$KEEP_BACKUPS" ] || return 0
+  excess=$((total - KEEP_BACKUPS))       # glob order is chronological (timestamp names)
+  while [ "$i" -lt "$excess" ]; do rm -rf "${sets[$i]}"; i=$((i+1)); done
+}
+
 # --- commands: sync / status --------------------------------------------
 cmd_sync() {
   if [ "$IS_HUB" = "1" ]; then
@@ -425,8 +444,9 @@ cmd_sync() {
   fi
   build_excludes
   hub_exec "echo ok" >/dev/null 2>&1 || die "hub unreachable ($HUB_USER@$HUB_HOST)"
-  local rb catalog subs line n=0 skip=0 fail=0; rb="$(rsync_bin)"
+  local rb catalog subs line n=0 skip=0 fail=0 br=""; rb="$(rsync_bin)"
   local rpath=(); [ -n "$HUB_RSYNC_PATH" ] && rpath=(--rsync-path="$HUB_RSYNC_PATH")
+  [ "$BACKUP" = "1" ] && br="$CFG_DIR/backups/$(date '+%Y%m%d-%H%M%S')"
   catalog="$(read_catalog)"
   subs="$(read_subs)"
   [ -n "$subs" ] || { echo "no subscriptions (try: ymir catalog; ymir add --to DEST SHARE)"; return 0; }
@@ -435,25 +455,34 @@ cmd_sync() {
     parse_entry "$line"
     if ! dest_ok "$E_DEST"; then warn "unsafe destination skipped: $E_DEST"; skip=$((skip+1)); continue; fi
     if ! in_catalog "$catalog" "$E_SRC"; then warn "not shared by hub, skipped: $E_SRC"; skip=$((skip+1)); continue; fi
-    local isdir suffix delflag=()
+    local isdir suffix delflag=() barg=()
     isdir="$(hub_exec "test -d \$HOME/$E_SRC && echo 1 || echo 0")"
     [ "$isdir" = "1" ] && suffix="/" || suffix=""
     [ "$MIRROR" = "1" ] && [ "$E_DEST" = "$E_SRC" ] && delflag=(--delete)
+    if [ -n "$br" ] && [ -e "$HOME/$E_DEST" ]; then    # back up only an existing dest
+      local bdir bpar
+      if [ "$isdir" = "1" ]; then bdir="$br/$E_DEST"
+      else bpar="$(dirname "$E_DEST")"; [ "$bpar" = "." ] && bdir="$br" || bdir="$br/$bpar"; fi
+      mkdir -p "$bdir"
+      barg=(--backup --backup-dir="$bdir")
+    fi
     mkdir -p "$HOME/$(dirname "$E_DEST")"
     case "$TRANSPORT" in
       ssh)
-        if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
               "$HUB_USER@$HUB_HOST:$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
           n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
       local)
-        if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" \
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" \
               "$HUB_ROOT/$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
           n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
     esac
   done <<< "$subs"
+  [ -n "$br" ] && prune_backups "$br"
   date '+%Y-%m-%dT%H:%M:%S' > "$STATE_FILE"
-  log "sync ok=$n skip=$skip fail=$fail mirror=$MIRROR"
+  log "sync ok=$n skip=$skip fail=$fail mirror=$MIRROR backup=$BACKUP"
   printf 'synced %d, skipped %d, failed %d\n' "$n" "$skip" "$fail"
+  if [ -n "$br" ] && [ -d "$br" ]; then printf 'backup: %s\n' "$br"; fi
   [ "$fail" -eq 0 ]
 }
 

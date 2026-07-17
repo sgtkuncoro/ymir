@@ -67,6 +67,8 @@ publishes it in one step.
 | `MIRROR` | `1` => `rsync --delete`, applied only to same-path subscriptions |
 | `INTERVAL` | launchd auto-sync interval (seconds) |
 | `HUB_RSYNC_PATH` | set to `/opt/homebrew/bin/rsync` if the hub has GNU rsync |
+| `BACKUP` | `1` (default) => back up every file a sync overwrites/deletes |
+| `KEEP_BACKUPS` | how many timestamped backup sets to keep (default 10) |
 
 ## Safety
 
@@ -76,6 +78,9 @@ publishes it in one step.
   like `~/.config`.
 - Secret patterns (`.ssh/*`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials`, `.env`, ...)
   are excluded from every transfer and blocked by `pub`/`push` without `--force`.
+- Every `sync` backs up files it overwrites/deletes into
+  `~/.config/ymir/backups/<timestamp>/` (kept: `KEEP_BACKUPS`, default 10). To recover,
+  copy the file back from there. Set `BACKUP="0"` to disable.
 
 ## Tests
 

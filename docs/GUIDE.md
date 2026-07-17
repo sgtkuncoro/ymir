@@ -139,6 +139,8 @@ File: `~/.config/ymir/config` (plain shell, sourced by ymir).
 | `MIRROR` | `0` | `1` adds `rsync --delete`, but only for same-path subscriptions. |
 | `INTERVAL` | `300` | launchd sync interval, seconds. |
 | `HUB_RSYNC_PATH` | *(empty)* | `/opt/homebrew/bin/rsync` if the hub has GNU rsync. |
+| `BACKUP` | `1` | Back up every file a `sync` overwrites/deletes into `~/.config/ymir/backups/<timestamp>/`. `0` disables. |
+| `KEEP_BACKUPS` | `10` | Number of timestamped backup sets to retain; older sets are pruned. |
 
 Env overrides (testing): `YMIR_CFG_DIR`, `YMIR_LOG`.
 
@@ -164,7 +166,7 @@ Every command also has `ymir <command> --help`.
 - `ymir sub --all` - subscribe to everything published (same paths).
 - `ymir unsub SHARE...` - unsubscribe (matches the SHARE field only). (alias: `rm`)
 - `ymir subs` - show subscriptions (`SHARE -> DEST`). (alias: `list`)
-- `ymir sync` - pull subscribed items to their chosen destinations.
+- `ymir sync` - pull subscribed items to their chosen destinations. Files it overwrites or deletes are backed up first (see `BACKUP`); recover from `~/.config/ymir/backups/<timestamp>/`.
 - `ymir push [--as SHARE] LOCALPATH` - push a local path to the hub and publish it. (alias: `publish`)
 
 ### Common
