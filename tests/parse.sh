@@ -2,6 +2,10 @@
 # Unit tests for ymir's parse_entry / dest_ok (sourced, main not run).
 set -u
 here="$(cd "$(dirname "$0")/.." && pwd)"
+# isolate from the host home so sourcing/config lookups never touch real files
+HOME="$(mktemp -d "${TMPDIR:-/tmp}/ymir-parse.XXXXXX")"; export HOME
+YMIR_CFG_DIR="$HOME/.config/ymir"; export YMIR_CFG_DIR
+trap 'rm -rf "$HOME"' EXIT
 # shellcheck disable=SC1090
 source "$here/bin/ymir"
 set +e
@@ -19,6 +23,8 @@ parse_entry ".a -> .b";      ck map-src    "$E_SRC" ".a";      ck map-dest  "$E_
 parse_entry ".c";            ck reset-dest "$E_DEST" ".c"
 # trailing slash stripped on dest
 parse_entry ".d -> .e/";     ck trailslash "$E_DEST" ".e"
+# trailing slash stripped on source too
+parse_entry ".d/ -> .e";     ck src-trailslash "$E_SRC" ".d"
 # surrounding whitespace trimmed
 parse_entry "  .f  ->  .g "; ck trim-src   "$E_SRC" ".f";      ck trim-dest "$E_DEST" ".g"
 

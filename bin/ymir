@@ -66,6 +66,7 @@ confirm() { # <prompt> [Y|N]
 
 load_cfg() {
   mkdir -p "$CFG_DIR"
+  # shellcheck disable=SC1090
   [ -f "$CFG_FILE" ] && . "$CFG_FILE"
   if [ "$IS_HUB" = "1" ]; then       # hub mode: operate on this machine's own home
     TRANSPORT="local"; HUB_ROOT="$HOME"; return
@@ -105,8 +106,9 @@ parse_entry() {
     src="$line"
   fi
   E_SRC="$(_trim "$src")"
+  E_SRC="${E_SRC%/}"           # strip trailing slash (match catalog normalization)
   E_DEST="$(_trim "$dest")"
-  E_DEST="${E_DEST%/}"          # strip trailing slash
+  E_DEST="${E_DEST%/}"         # strip trailing slash
   [ -n "$E_DEST" ] || E_DEST="$E_SRC"
 }
 
@@ -122,6 +124,7 @@ dest_ok() {
 # Normalise an input path to a HOME-relative entry (or absolute if outside HOME).
 to_rel() {
   local in="$1" abs
+  # shellcheck disable=SC2088  # literal "~/" match is intended, not expansion
   case "$in" in
     "~/"*) in="$HOME/${in#\~/}" ;;
     "~")   in="$HOME" ;;
@@ -141,8 +144,9 @@ is_secret() {
   local rel="$1" base pat
   base="$(basename "$rel")"
   for pat in "${SECRET_PATTERNS[@]}"; do
-    # shellcheck disable=SC2053
+    # shellcheck disable=SC2053,SC2254  # glob match against secret patterns is intended
     case "$rel"  in $pat) return 0 ;; esac
+    # shellcheck disable=SC2053,SC2254
     case "$base" in $pat) return 0 ;; esac
   done
   return 1

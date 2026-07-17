@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  test:
+    # Tests use only bash + rsync + sed + grep + coreutils (no scutil/launchctl/
+    # tailscale), so they run on Linux; macos-latest catches BSD-tool / bash-3.2
+    # regressions on the real target OS.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck + rsync (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck rsync
+
+      - name: Install shellcheck (macOS; rsync ships with the runner)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Lint
+        run: shellcheck -S warning bin/ymir tests/parse.sh tests/run.sh
+
+      - name: Unit tests (parse_entry / dest_ok)
+        run: bash tests/parse.sh
+
+      - name: Behavior tests (local transport)
+        run: bash tests/run.sh
