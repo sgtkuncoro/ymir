@@ -136,16 +136,24 @@ That is what makes the tool testable without a hub (see [section 12](#12-testing
 
 ## 5. Install
 
+Recommended - the guided wizard:
+
 ```sh
-# from the repo
+brew install rsync         # GNU rsync (once per machine)
+./bin/ymir setup           # prereqs, hub/spoke, config, PATH symlink, agent
+```
+
+Manual equivalent:
+
+```sh
 ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # put on PATH
 ymir init                                          # write ~/.config/ymir/config
 $EDITOR ~/.config/ymir/config                      # set HUB_USER="<id -un on hub>"
 ymir status                                         # expect: reachable: yes
 ```
 
-Repeat the symlink + `init` + set `HUB_USER` on each spoke. The manifest is shared (it
-lives on the hub), so you only build the managed set once.
+Run `ymir setup` on each machine. The manifest is shared (it lives on the hub), so you
+only build the managed set once.
 
 ---
 
@@ -171,6 +179,16 @@ Environment overrides (handy for testing): `YMIR_CFG_DIR`, `YMIR_LOG`.
 ## 7. Command reference
 
 Every command also has `ymir <command> --help`.
+
+### `ymir setup`
+Guided interactive setup and the recommended way to start. Checks Tailscale + GNU rsync
+(offers to install rsync), asks whether this machine is the HUB or a SPOKE, collects
+`HUB_HOST`/`HUB_USER`, writes `~/.config/ymir/config`, optionally symlinks `ymir` onto
+PATH, tests hub reachability, and optionally installs the launchd agent. Re-runnable
+(asks before overwriting); falls back to defaults when run non-interactively.
+```sh
+ymir setup
+```
 
 ### `ymir init`
 Write the config template if it does not exist. Never overwrites. Does not need a hub.

@@ -14,24 +14,24 @@ Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
 
 ## Install
 
+Fastest path is the guided wizard:
+
 ```sh
-# GNU rsync is required (already installed via: brew install rsync)
-ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # put it on PATH
+brew install rsync                 # GNU rsync (once)
+./bin/ymir setup                   # asks hub/spoke, writes config, links PATH, agent
+```
+
+`ymir setup` checks prerequisites, asks whether this machine is the HUB or a SPOKE,
+collects `HUB_HOST`/`HUB_USER`, writes `~/.config/ymir/config`, offers to symlink
+`ymir` onto your PATH, tests hub reachability, and can install the launchd agent.
+
+Manual equivalent, if you prefer:
+
+```sh
+ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # PATH
 ymir init                                          # writes ~/.config/ymir/config
-```
-
-Then set the hub username in `~/.config/ymir/config`:
-
-```sh
-# on the hub (macminim4), find the local account name:
-id -un
-# put that value in HUB_USER=""
-```
-
-Verify:
-
-```sh
-ymir status      # should show reachable: yes
+$EDITOR ~/.config/ymir/config                      # set HUB_USER (run `id -un` on hub)
+ymir status                                         # expect: reachable: yes
 ```
 
 ## Use
