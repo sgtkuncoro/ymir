@@ -1,149 +1,151 @@
-# Blueprint: ymir spoke-defined routing
+# Blueprint: ymir publish/subscribe routing
 
-Objective: each spoke decides which hub files it wants and where they land locally.
-The hub just holds files; it needs zero knowledge of the spokes.
+Objective: the HUB decides what to share (source of truth + share catalog); each SPOKE
+decides which shared items it pulls and WHERE they land locally. The hub needs no
+knowledge of the spokes.
 
-Status: REVIEWED design pivot (was hub-defined; user chose spoke-defined routing).
+Status: DESIGN (pub/sub model, confirmed with user)
 Mode: git present (origin github.com/sgtkuncoro/ymir, `main`). One commit per step.
 
 ---
 
-## Why this model (resolves the earlier objection)
+## The model
 
-Objection: "the hub doesn't know the spokes, so it can't define a per-spoke dest."
-Correct. So we move the routing to the spoke:
+Two lists, two authorities:
 
-- **Hub** = a bag of files (the master copies). Knows nothing about spokes.
-- **Spoke** = keeps its OWN list of pull rules: "get `hub:SRC`, put it at my `DEST`".
-- Each spoke only ever manages its own list, so per-machine destinations are natural
-  and `--for`/targeting/`NODE_NAME` disappear entirely.
+| List | Lives on | Owner decides | Contents |
+|------|----------|---------------|----------|
+| **share catalog** | the hub | hub = what is shareable | `~/.config/ymir/shares.list` -> HOME-relative hub paths |
+| **subscriptions** | each spoke | spoke = what it wants + where | `~/.config/ymir/paths.list` -> `SHARE -> DEST` |
 
-This is a change from today, where the list lives on the hub and is shared. After this
-change the list lives **locally on each spoke**.
+Rules:
+- The hub publishes a **catalog** of paths it offers. It is the source of truth for
+  both the file content and the set of shareable paths.
+- A spoke reads the catalog, **subscribes** to the items it wants, and sets a local
+  destination per item (defaults to the same path).
+- `sync` on a spoke pulls each subscription `hub:SHARE -> spoke:DEST`, but only if
+  `SHARE` is still in the hub catalog (hub stays the gatekeeper). Un-sharing on the hub
+  stops future pulls.
+- The hub never references a spoke. Spokes are self-selecting.
 
 ```mermaid
 flowchart LR
-  H[(hub: master files)]
-  subgraph work-laptop
-    LW[list: work.gitconfig -> .gitconfig]
+  subgraph HUB [hub = source of truth]
+    C["share catalog:\nnvim\nwork.gitconfig\nzshrc"]
   end
-  subgraph home-laptop
-    LH[list: personal.gitconfig -> .gitconfig]
+  subgraph W [work-laptop]
+    SW["subscriptions:\nnvim -> .config/nvim\nwork.gitconfig -> .gitconfig"]
   end
-  H -->|sync pulls per its own list| LW
-  H -->|sync pulls per its own list| LH
+  subgraph H [home-laptop]
+    SH["subscriptions:\nnvim -> .config/nvim\nzshrc -> .zshrc"]
+  end
+  C -->|sync pulls subscribed| SW
+  C -->|sync pulls subscribed| SH
 ```
 
-## Grammar (spoke-local manifest: `~/.config/ymir/paths.list` on each spoke)
+## Commands by role
 
-```
-SRC [-> DEST]
-```
-- `SRC`  path on the hub (HOME-relative).
-- `DEST` path on THIS spoke (HOME-relative); defaults to `SRC`.
-- No `@targets` and no `NODE_NAME` (the list is already per-spoke).
+### Hub (IS_HUB=1) - decides what is shared
+| Command | Effect |
+|---|---|
+| `ymir share PATH...` | add PATH (must exist on hub) to the share catalog |
+| `ymir unshare PATH...` | remove from the catalog |
+| `ymir shares` (alias `list`) | show what the hub offers |
+| `ymir sync` | no-op (the hub is the source) |
+| `ymir status` | role HUB, N shared |
 
-Plain lines stay valid (`.zshrc` = pull `hub:~/.zshrc` -> `~/.zshrc`).
+### Spoke - decides what it pulls and where
+| Command | Effect |
+|---|---|
+| `ymir catalog` (alias `hub-ls`) | show the hub's share catalog (over SSH) |
+| `ymir add [--to DEST] SHARE...` | subscribe to a shared item, optional local placement |
+| `ymir add --all` | subscribe to everything currently shared (same paths) |
+| `ymir rm SHARE...` | unsubscribe |
+| `ymir list` | show this spoke's subscriptions (`SHARE -> DEST`) |
+| `ymir sync` | pull each subscription hub:SHARE -> local:DEST |
+| `ymir status` | role spoke, N subscriptions, hub reachable |
 
-## Command semantics (all run ON the spoke; no SSH needed to edit the list)
+## Grammars
 
-| Command | Runs on | Effect |
-|---|---|---|
-| `ymir add [--to DEST] SRC...` | spoke | add pull rule(s) to the LOCAL list |
-| `ymir rm SRC...` | spoke | remove local rule(s) by SRC |
-| `ymir list` | spoke | show this spoke's rules |
-| `ymir sync` | spoke | pull each rule hub:SRC -> local:DEST |
-| `ymir status` | spoke | hub reachable, rule count, last sync |
-| `ymir hub-ls [PATH]` | spoke | list what's available under the hub's home (discovery) |
-| `ymir publish [--as SRC] LOCALPATH` | spoke | push a local file UP to the hub (optional) |
+- Hub `shares.list`: one HOME-relative path per line (plain; this is today's hub
+  manifest, just renamed conceptually to "shares").
+- Spoke `paths.list`: `SHARE [-> DEST]` (DEST defaults to SHARE).
 
-Hub side: just hold files. `ymir status` on the hub (IS_HUB=1) reports role HUB; add/
-rm/list/sync are no-ops there (the hub does not subscribe).
+## Safety / correctness (carried from the adversarial review)
 
-## Safety / correctness (carried from the prior adversarial review)
-
-- **DEST validation** [C3/M1]: reject leading `/` or any `..` segment; `--to` runs
-  through `to_rel` and must resolve inside `$HOME`. Never build `$HOME/$DEST` from an
-  unvalidated field.
-- **MIRROR delete-gating** [C2]: `--delete` (MIRROR=1) applies only when `DEST == SRC`,
-  so a remap can never wipe a shared parent dir on the spoke.
-- **Parser reset** [C1]: `parse_entry` resets `E_SRC/E_DEST` first, then recomputes
-  `E_DEST=${E_DEST:-$E_SRC}`.
-- **rm by SRC field** [M2]: decode each line's SRC and compare equal; never bare grep.
-- **Trim/CRLF** [m2]: strip surrounding whitespace incl `\r`; strip trailing `/` from
-  DEST before adding the dir suffix.
-- **Sourcing guard** [m5]: `[ "${BASH_SOURCE[0]}" = "$0" ] && main "$@"` for testability.
-- Secret guard still applies to SRC. Still one-way pull.
+- **Catalog gatekeeping**: a spoke `sync` pulls a SHARE only if it is in the hub's
+  current catalog; otherwise skip+warn. Hub stays source of truth.
+- **DEST validation** [C3/M1]: reject leading `/` or any `..`; `--to` via `to_rel`,
+  must resolve inside `$HOME`.
+- **MIRROR delete-gating** [C2]: `--delete` only when `DEST == SHARE`.
+- **Parser reset** [C1]: reset `E_SRC/E_DEST` first; `E_DEST=${E_DEST:-$E_SRC}`.
+- **rm/unshare by field** [M2]: decode the key field and compare equal; never bare grep.
+- **Trim/CRLF, trailing slash** [m2]; **sourcing guard** [m5] for tests.
+- Secret guard applies to SHARE at `share` time. One-way pull only.
 
 ## Non-goals
 
-- No `@targets`/`NODE_NAME` (dropped; per-spoke list replaces them).
-- No spaces / ` -> ` / single quotes in paths (documented limitation).
-- Directory remap uses rsync contents-merge; documented.
+- No `@targets` / `NODE_NAME` (self-selection via subscriptions replaces them).
+- No spaces / ` -> ` / single quotes in paths (documented).
+- Directory shares use rsync contents-merge; documented.
 
 ---
 
 ## Steps
 
-### Step 1 - Move the list to the spoke + SRC->DEST parser + tests  [strongest]
+### Step 1 - Hub share catalog + parser + tests  [strongest]
 
-Context: today `read_manifest`/`cmd_add`/`cmd_rm`/`cmd_list` operate on the HUB manifest
-via `hub_exec`. This step makes the list LOCAL.
+Context: today the hub manifest + `cmd_add/rm/list` already implement a hub-side list.
+Reframe it as the SHARE CATALOG and make the verbs role-aware.
 
 Tasks:
-1. Point `read_manifest`, `cmd_add`, `cmd_rm`, `cmd_list` at the LOCAL
-   `$CFG_DIR/paths.list` (no `hub_exec` for list management).
+1. Rename the hub list concept to `shares.list`; on the hub, `share`/`unshare`/`shares`
+   manage it (keep `add`/`rm`/`list` as aliases when IS_HUB=1). Keep the secret guard.
 2. Add `parse_entry` (reset-first, split ` -> `, trim incl `\r`, strip trailing `/` on
-   DEST, `E_DEST=${E_DEST:-$E_SRC}`) and `dest_ok` (reject `/` prefix and `..`).
-3. Sourcing guard at file bottom; add `tests/parse.sh` covering plain / dest-only /
-   plain-after-dest reset / dest_ok rejects `../x` and `/x`.
-4. `cmd_add` keeps the secret guard on SRC; dedup on the composed line.
+   DEST) + `dest_ok` (reject `/` prefix, `..`).
+3. Sourcing guard + `tests/parse.sh` (plain, dest-only, reset-after-dest, dest_ok).
 
-Verify: `bash tests/parse.sh`; `bash -n bin/ymir`; `ymir add`/`list`/`rm` edit the local
-file with no hub round trip (test with hub unreachable).
-Exit: list is spoke-local; parser + tests committed.
+Verify: `bash tests/parse.sh`; `bash -n bin/ymir`; on hub, share/unshare/shares work.
+Exit: hub catalog + parser + tests committed.
 
-### Step 2 - Routing-aware sync from the local list  [default]  (dep: Step 1)
+### Step 2 - Spoke subscriptions + catalog view  [default]  (dep: Step 1)
 
 Tasks:
-1. `cmd_sync` reads the LOCAL list; per line `parse_entry`; `dest_ok` false -> warn+skip.
-2. rsync `hub:E_SRC` -> `$HOME/E_DEST`; dir suffix from remote `test -d E_SRC`;
-   `mkdir -p` dest parent.
-3. `--delete` only when `E_DEST == E_SRC` [C2].
-4. Summary: synced / skipped / failed.
+1. Spoke-local `paths.list` of `SHARE -> DEST`. `cmd_add` on a spoke = subscribe:
+   `--to DEST` (single SHARE; normalize via `to_rel` + `dest_ok`), `--all` to subscribe
+   to every catalog entry at its own path. Managing subscriptions needs NO hub round
+   trip except `--all`/validation.
+2. `ymir catalog` / `hub-ls`: fetch and print the hub `shares.list` (over SSH).
+3. On `add`, warn if SHARE is not in the current catalog (typo guard) but still allow.
+4. `cmd_rm` unsubscribe by SHARE field. `cmd_list` renders `SHARE -> DEST`.
 
-Verify (local transport): `.a -> .b` lands at `~/.b`; plain line same path; MIRROR=1 with
-a remap does not delete dest siblings (assert an unrelated file survives).
-Exit: sync pulls per the local rules with safe delete-gating.
+Verify (local transport): subscribe with/without `--to`; `catalog` lists hub shares;
+`add --to ../evil x` rejected; `rm` drops only the named SHARE.
+Exit: spokes can browse the catalog and manage placement.
 
-### Step 3 - `--to`, discovery, publish, status/help/docs  [default]  (dep: Step 2)
-
-Tasks:
-1. `cmd_add`: `--to DEST` (single SRC; multi -> error) normalized via `to_rel` + `dest_ok`.
-2. `cmd_add` seed/publish: if `hub:SRC` missing but local `DEST` exists, offer to push
-   local `DEST` -> `hub:SRC` (keeps the convenient first-time upload).
-3. `ymir hub-ls [PATH]`: list entries under the hub home (or PATH) so you can see what
-   SRC values exist to pull. (`hub_exec "ls -1 ~/PATH"`.)
-4. `ymir publish [--as SRC] LOCALPATH`: explicit push of a local file up to the hub.
-5. `cmd_list` renders `SRC -> DEST` (omit `-> DEST` when equal). `cmd_status` shows
-   rule count + hub reachability. Update usage + help_topic.
-
-Verify: `add --to .b .a` -> local line `.a -> .b`; `add --to ../evil .a` rejected;
-`hub-ls` lists hub files; `rm .a` drops only `.a`.
-Exit: full spoke-defined routing usable end to end.
-
-### Step 4 - setup + docs  [default]  (dep: Step 3)
+### Step 3 - Routing-aware spoke sync (gatekept)  [default]  (dep: Step 2)
 
 Tasks:
-1. `cmd_setup`: spoke path unchanged except it explains the list is local; hub path
-   unchanged. (No NODE_NAME needed anymore - remove any prior NODE_NAME wording.)
-2. GUIDE.md: rewrite routing section for the spoke-defined model (grammar, `--to`,
-   `hub-ls`, `publish`, examples, DEST safety, dir-merge caveat).
-3. README.md: short spoke-defined example.
-4. capability doc: mark spoke-defined routing delivered.
+1. `cmd_sync` (spoke): read local subscriptions; per line `parse_entry`; `dest_ok`
+   false -> warn+skip; SHARE not in hub catalog -> warn+skip (gatekeeping).
+2. rsync `hub:SHARE` -> `$HOME/DEST`; dir suffix from remote `test -d SHARE`;
+   `mkdir -p` dest parent. `--delete` only when `DEST == SHARE` [C2].
+3. Hub `sync` stays a no-op. Summary: synced / skipped / failed.
 
-Verify: `ymir setup` writes correct config; docs fences balanced; full regression
-(plain + mapped, hub-ls, publish); `bash -n` clean.
+Verify: subscribed `nvim -> .config/nvim` lands correctly; un-shared item is skipped on
+next sync; MIRROR remap does not delete dest siblings.
+Exit: end-to-end pub/sub sync with hub authority.
+
+### Step 4 - setup + docs + optional publish  [default]  (dep: Step 3)
+
+Tasks:
+1. `cmd_setup`: hub path explains `share`; spoke path explains `catalog` + `add --to`.
+2. Optional `ymir publish [--as SHARE] LOCALPATH` (spoke): push a local file to the hub
+   AND add it to the catalog - convenience for curating from a laptop.
+3. GUIDE.md + README.md: rewrite for the pub/sub model with examples; capability doc
+   marks it delivered. Keep generic (no real machine names).
+
+Verify: `ymir setup` both roles; docs fences balanced; full regression; `bash -n` clean.
 Exit: documented + configurable.
 
 ---
@@ -151,19 +153,21 @@ Exit: documented + configurable.
 ## Dependency graph
 
 ```
-Step1 -> Step2 -> Step3 -> Step4    (all edit bin/ymir -> serial)
+Step1 -> Step2 -> Step3 -> Step4   (all edit bin/ymir -> serial)
 ```
 
 ## Invariants after every step
 
 - `bash tests/parse.sh` + `bash -n bin/ymir` pass.
-- Managing the list needs NO hub connection (it is local); only `sync`/`hub-ls`/
-  `publish` touch the hub.
-- No rule can write outside `$HOME`; MIRROR never deletes a remapped dest.
-- No real machine names / IPs / usernames in the repo.
+- Hub is the sole authority on what is shareable; a spoke cannot pull an un-shared path.
+- Subscriptions are spoke-local; managing them needs no hub round trip (except catalog
+  view / `--all`).
+- No subscription can write outside `$HOME`; MIRROR never deletes a remapped dest.
+- Repo stays generic (no real machine names / IPs / usernames).
 
-## Migration note
+## Migration
 
-Existing installs keep the hub manifest; after this change the list is read locally. On
-each spoke, re-add the paths you want (or copy the old hub `paths.list` down once). This
-is a one-time, documented step.
+Today's hub manifest becomes the share catalog (rename `paths.list` -> `shares.list` on
+the hub, or keep the filename and treat it as the catalog). Spokes gain a new local
+subscription list; on first run a spoke subscribes (or `add --all`) to what it wants.
+Documented one-time step.
