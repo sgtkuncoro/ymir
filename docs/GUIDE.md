@@ -1,6 +1,6 @@
-# ymirr - Complete Guide
+# ymir - Complete Guide
 
-`ymirr` keeps a **managed, add/removable list** of config paths in sync from one **hub**
+`ymir` keeps a **managed, add/removable list** of config paths in sync from one **hub**
 machine to your other Macs, over your **Tailscale** tailnet. No cloud service, nothing
 exposed to the public internet.
 
@@ -23,7 +23,7 @@ exposed to the public internet.
 
 ## 1. What it is
 
-A ~250-line Bash CLI (`bin/ymirr`) that wraps `rsync` running over Tailscale SSH. It
+A ~250-line Bash CLI (`bin/ymir`) that wraps `rsync` running over Tailscale SSH. It
 solves one problem: "keep these particular config files/dirs the same across my Macs,
 and let me add or remove paths from that set at any time."
 
@@ -39,10 +39,10 @@ conflict logic and no chance of a stale laptop overwriting good config.
 |------|---------|
 | **Hub** | The one machine that owns the truth. Default `macminim4`. Holds the manifest and the canonical copy of every managed path. |
 | **Spoke** | Any other Mac that pulls from the hub. Your laptops. |
-| **Manifest** | `~/.config/ymirr/paths.list` **on the hub**. One managed path per line. This is the add/removable list. |
+| **Manifest** | `~/.config/ymir/paths.list` **on the hub**. One managed path per line. This is the add/removable list. |
 | **Managed path** | A file or directory registered in the manifest and therefore synced. |
 | **HOME-relative** | Managed paths under your home are stored without the `/Users/<name>` prefix (e.g. `.config/nvim`), so they map correctly even though the hub user and laptop user differ. |
-| **Transport** | How ymirr reaches the hub: `ssh` (real, over Tailscale) or `local` (for testing). |
+| **Transport** | How ymir reaches the hub: `ssh` (real, over Tailscale) or `local` (for testing). |
 | **Seed** | The one-time upload of a path from a spoke to the hub when you first `add` a path that only exists locally. |
 
 ### Topology
@@ -99,7 +99,7 @@ append rel to hub manifest (deduped)
 ### `sync` algorithm (the core)
 
 ```
-manifest = read hub:~/.config/ymirr/paths.list
+manifest = read hub:~/.config/ymir/paths.list
 cache manifest locally
 for each rel in manifest:
     isdir = (hub: test -d ~/rel)
@@ -129,7 +129,7 @@ That is what makes the tool testable without a hub (see [section 12](#12-testing
 - **Tailscale SSH enabled on the hub**: `sudo tailscale set --ssh` (already on for
   `macminim4`). This lets spokes SSH in using Tailscale identity - no SSH keys to manage.
 - **GNU rsync** on the spoke: `brew install rsync` (installs `/opt/homebrew/bin/rsync`).
-  ymirr auto-prefers it over macOS's limited `openrsync`.
+  ymir auto-prefers it over macOS's limited `openrsync`.
 - The hub's local macOS **account name** (run `id -un` on the hub) for `HUB_USER`.
 
 ---
@@ -138,10 +138,10 @@ That is what makes the tool testable without a hub (see [section 12](#12-testing
 
 ```sh
 # from the repo
-ln -sf "$PWD/bin/ymirr" /opt/homebrew/bin/ymirr   # put on PATH
-ymirr init                                          # write ~/.config/ymirr/config
-$EDITOR ~/.config/ymirr/config                      # set HUB_USER="<id -un on hub>"
-ymirr status                                         # expect: reachable: yes
+ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # put on PATH
+ymir init                                          # write ~/.config/ymir/config
+$EDITOR ~/.config/ymir/config                      # set HUB_USER="<id -un on hub>"
+ymir status                                         # expect: reachable: yes
 ```
 
 Repeat the symlink + `init` + set `HUB_USER` on each spoke. The manifest is shared (it
@@ -151,7 +151,7 @@ lives on the hub), so you only build the managed set once.
 
 ## 6. Configuration reference
 
-File: `~/.config/ymirr/config` (plain shell, sourced by ymirr).
+File: `~/.config/ymir/config` (plain shell, sourced by ymir).
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -163,51 +163,51 @@ File: `~/.config/ymirr/config` (plain shell, sourced by ymirr).
 | `INTERVAL` | `300` | launchd sync interval, seconds. |
 | `HUB_RSYNC_PATH` | *(empty)* | Set to `/opt/homebrew/bin/rsync` if the hub has GNU rsync, to force it server-side. |
 
-Environment overrides (handy for testing): `YMIRR_CFG_DIR`, `YMIRR_LOG`.
+Environment overrides (handy for testing): `YMIR_CFG_DIR`, `YMIR_LOG`.
 
 ---
 
 ## 7. Command reference
 
-Every command also has `ymirr <command> --help`.
+Every command also has `ymir <command> --help`.
 
-### `ymirr init`
+### `ymir init`
 Write the config template if it does not exist. Never overwrites. Does not need a hub.
 
-### `ymirr add [--force] PATH...`
+### `ymir add [--force] PATH...`
 Register path(s). Seeds a locally-existing path up to the hub the first time. Refuses
 secret-looking paths unless `--force`. Accepts absolute, `~`-relative, or cwd-relative
 paths. Run from any Mac.
 ```sh
-ymirr add ~/.zshrc ~/.config/nvim ~/.gitconfig
-ymirr add ~/.config/ghostty          # directory, synced recursively
-ymirr add --force ~/.config/app/x.env
+ymir add ~/.zshrc ~/.config/nvim ~/.gitconfig
+ymir add ~/.config/ghostty          # directory, synced recursively
+ymir add --force ~/.config/app/x.env
 ```
 
-### `ymirr rm PATH...`
+### `ymir rm PATH...`
 Unregister path(s). Removes only the manifest entry; local and hub copies stay.
 ```sh
-ymirr rm ~/.zshrc
+ymir rm ~/.zshrc
 ```
 
-### `ymirr list` (alias `ls`)
+### `ymir list` (alias `ls`)
 Print managed paths, read live from the hub manifest.
 
-### `ymirr sync`
+### `ymir sync`
 Pull all managed paths hub -> this machine. Idempotent. Honors `MIRROR`. This is what the
 launchd agent runs.
 
-### `ymirr status`
+### `ymir status`
 Show hub `user@host`, transport, reachability, managed count, last sync time.
 
-### `ymirr install-agent`
+### `ymir install-agent`
 Install + load a launchd agent that runs `sync` at login and every `INTERVAL` seconds.
 Re-run to apply a new `INTERVAL`.
 
-### `ymirr uninstall-agent`
+### `ymir uninstall-agent`
 Unload and delete the agent. Config and files untouched.
 
-### `ymirr help [command]` / `ymirr --help` / `-h`
+### `ymir help [command]` / `ymir --help` / `-h`
 Overview, or detailed help for one command.
 
 ---
@@ -216,45 +216,45 @@ Overview, or detailed help for one command.
 
 ### First-time setup (hub is `macminim4`, you are on a laptop)
 ```sh
-ymirr init
-$EDITOR ~/.config/ymirr/config      # HUB_USER="<id -un on hub>"
-ymirr status                        # reachable: yes
-ymirr add ~/.zshrc ~/.gitconfig ~/.config/nvim
-ymirr sync
-ymirr install-agent                 # keep it current automatically
+ymir init
+$EDITOR ~/.config/ymir/config      # HUB_USER="<id -un on hub>"
+ymir status                        # reachable: yes
+ymir add ~/.zshrc ~/.gitconfig ~/.config/nvim
+ymir sync
+ymir install-agent                 # keep it current automatically
 ```
 
 ### Add a new path later (from any Mac)
 ```sh
-ymirr add ~/.config/starship.toml
-ymirr sync        # or wait for the agent
+ymir add ~/.config/starship.toml
+ymir sync        # or wait for the agent
 ```
 
 ### Stop syncing something
 ```sh
-ymirr rm ~/.config/nvim
+ymir rm ~/.config/nvim
 ```
 
 ### Change config that is under management
 Edit it **on the hub** (`macminim4`). On a spoke, edits are overwritten by the next
-`sync`. If you must edit on a spoke, do it, then run `ymirr add` again is not needed -
+`sync`. If you must edit on a spoke, do it, then run `ymir add` again is not needed -
 instead copy up manually or switch to a two-way engine (see FAQ).
 
 ---
 
 ## 9. Automation (launchd)
 
-`install-agent` writes `~/Library/LaunchAgents/com.ymirr.sync.plist`:
+`install-agent` writes `~/Library/LaunchAgents/com.ymir.sync.plist`:
 
 - `RunAtLoad` - sync at login.
 - `StartInterval` = `INTERVAL` seconds - periodic sync.
-- stdout/stderr -> `~/.config/ymirr/ymirr.log`.
+- stdout/stderr -> `~/.config/ymir/ymir.log`.
 
 Inspect / control:
 ```sh
-launchctl list | grep com.ymirr
-tail -f ~/.config/ymirr/ymirr.log
-ymirr uninstall-agent
+launchctl list | grep com.ymir
+tail -f ~/.config/ymir/ymir.log
+ymir uninstall-agent
 ```
 
 ---
@@ -276,15 +276,15 @@ ymirr uninstall-agent
 
 | Symptom | Cause / fix |
 |---------|-------------|
-| `HUB_USER not set` | Edit `~/.config/ymirr/config`; run `id -un` on the hub for the value. |
+| `HUB_USER not set` | Edit `~/.config/ymir/config`; run `id -un` on the hub for the value. |
 | `failed to look up local user "X"` | Wrong `HUB_USER`. It must be the hub's **local** account, not the tailnet email. |
 | `status` shows `reachable: NO` | Hub offline, wrong `HUB_HOST`, or Tailscale SSH off on the hub (`sudo tailscale set --ssh`). |
 | `cannot read hub manifest` | Hub unreachable, or nothing added yet (empty is fine, `list` shows "(manifest empty)"). |
 | First SSH hangs / prompts | Tailscale SSH may require a one-time browser check; approve it, then retry. |
-| A path did not update | Check it is in `ymirr list`, not matched by a secret pattern, and that you edited it **on the hub**. |
+| A path did not update | Check it is in `ymir list`, not matched by a secret pattern, and that you edited it **on the hub**. |
 | rsync flag errors | Ensure GNU rsync: `brew install rsync` (system `openrsync` lacks options). |
 
-Verbose peek: `tail -n 50 ~/.config/ymirr/ymirr.log` and `tailscale status`.
+Verbose peek: `tail -n 50 ~/.config/ymir/ymir.log` and `tailscale status`.
 
 ---
 
@@ -294,11 +294,11 @@ The `local` transport treats a directory as a fake hub, so you can exercise the 
 add/seed/sync/rm/secret-guard flow offline:
 
 ```sh
-T=/tmp/ymirr-test; rm -rf "$T"; mkdir -p "$T/spoke" "$T/hub"
+T=/tmp/ymir-test; rm -rf "$T"; mkdir -p "$T/spoke" "$T/hub"
 echo v1 > "$T/spoke/.zshrc"; echo hub > "$T/hub/.gitconfig"
-mkdir -p "$T/spoke/.config/ymirr"
-printf 'TRANSPORT="local"\nHUB_ROOT="%s"\nMIRROR="0"\n' "$T/hub" > "$T/spoke/.config/ymirr/config"
-( cd "$T/spoke" && HOME="$T/spoke" ymirr add .zshrc .gitconfig && HOME="$T/spoke" ymirr sync )
+mkdir -p "$T/spoke/.config/ymir"
+printf 'TRANSPORT="local"\nHUB_ROOT="%s"\nMIRROR="0"\n' "$T/hub" > "$T/spoke/.config/ymir/config"
+( cd "$T/spoke" && HOME="$T/spoke" ymir add .zshrc .gitconfig && HOME="$T/spoke" ymir sync )
 cat "$T/hub/.zshrc"        # seeded up
 cat "$T/spoke/.gitconfig"  # pulled down
 ```

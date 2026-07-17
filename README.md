@@ -1,4 +1,4 @@
-# ymirr
+# ymir
 
 Pull-sync a **managed, add/removable list** of config paths from one hub to your other
 Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
@@ -16,11 +16,11 @@ Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
 
 ```sh
 # GNU rsync is required (already installed via: brew install rsync)
-ln -sf "$PWD/bin/ymirr" /opt/homebrew/bin/ymirr   # put it on PATH
-ymirr init                                          # writes ~/.config/ymirr/config
+ln -sf "$PWD/bin/ymir" /opt/homebrew/bin/ymir   # put it on PATH
+ymir init                                          # writes ~/.config/ymir/config
 ```
 
-Then set the hub username in `~/.config/ymirr/config`:
+Then set the hub username in `~/.config/ymir/config`:
 
 ```sh
 # on the hub (macminim4), find the local account name:
@@ -31,25 +31,25 @@ id -un
 Verify:
 
 ```sh
-ymirr status      # should show reachable: yes
+ymir status      # should show reachable: yes
 ```
 
 ## Use
 
 ```sh
-ymirr add ~/.zshrc ~/.config/nvim   # register (seeds up to hub if new)
-ymirr add --force ~/.somesecret     # override the secret guard (rare)
-ymirr rm  ~/.zshrc                  # unregister (local copy kept)
-ymirr list                         # show managed paths
-ymirr sync                         # pull hub -> this machine now
-ymirr install-agent                # launchd: auto-sync every INTERVAL seconds
-ymirr uninstall-agent
+ymir add ~/.zshrc ~/.config/nvim   # register (seeds up to hub if new)
+ymir add --force ~/.somesecret     # override the secret guard (rare)
+ymir rm  ~/.zshrc                  # unregister (local copy kept)
+ymir list                         # show managed paths
+ymir sync                         # pull hub -> this machine now
+ymir install-agent                # launchd: auto-sync every INTERVAL seconds
+ymir uninstall-agent
 ```
 
-Run `ymirr add/rm` on any Mac; because the manifest lives on the hub, the managed set is
+Run `ymir add/rm` on any Mac; because the manifest lives on the hub, the managed set is
 shared. Other spokes pick up the change on their next `sync`.
 
-## Config (`~/.config/ymirr/config`)
+## Config (`~/.config/ymir/config`)
 
 | Key | Meaning |
 |-----|---------|

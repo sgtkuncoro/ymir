@@ -1,6 +1,6 @@
 # Capability: Sync/Mirror Config Paths Across the Tailnet
 
-Status: IMPLEMENTED (one-way pull via rsync). Tool: bin/ymirr. Pending: set HUB_USER.
+Status: IMPLEMENTED (one-way pull via rsync). Tool: bin/ymir. Pending: set HUB_USER.
 Date: 2026-07-17
 Owner: sgtkuncoro
 

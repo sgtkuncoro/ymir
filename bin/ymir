@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# ymirr - sync/mirror a managed list of paths across a Tailscale tailnet.
+# ymir - sync/mirror a managed list of paths across a Tailscale tailnet.
 #
 # Model: one-way PULL from a single hub (source of truth) to this machine.
-#   - The hub owns the manifest (~/.config/ymirr/paths.list) and the canonical files.
+#   - The hub owns the manifest (~/.config/ymir/paths.list) and the canonical files.
 #   - Paths are stored HOME-relative, so a hub user (e.g. "sk") and a local user
 #     (e.g. "sky0") map correctly even though /Users/<name> differs.
 #   - `add`/`rm`/`list` edit the hub manifest. `sync` pulls hub -> local.
@@ -14,11 +14,11 @@
 #
 set -euo pipefail
 
-CFG_DIR="${YMIRR_CFG_DIR:-$HOME/.config/ymirr}"
+CFG_DIR="${YMIR_CFG_DIR:-$HOME/.config/ymir}"
 CFG_FILE="$CFG_DIR/config"
 LOCAL_MANIFEST="$CFG_DIR/paths.list.cache"
 STATE_FILE="$CFG_DIR/last-sync"
-LOG_FILE="${YMIRR_LOG:-$CFG_DIR/ymirr.log}"
+LOG_FILE="${YMIR_LOG:-$CFG_DIR/ymir.log}"
 
 # --- defaults (overridable in $CFG_FILE) ---------------------------------
 HUB_HOST="macminim4"
@@ -36,18 +36,18 @@ SECRET_PATTERNS=(
   "*.keychain*" ".aws/credentials" ".gnupg/*" ".netrc" "*.env" ".env"
 )
 
-REMOTE_MANIFEST='$HOME/.config/ymirr/paths.list'   # expanded on the hub
+REMOTE_MANIFEST='$HOME/.config/ymir/paths.list'   # expanded on the hub
 
 # --- helpers -------------------------------------------------------------
-die()  { printf 'ymirr: %s\n' "$*" >&2; exit 1; }
-warn() { printf 'ymirr: %s\n' "$*" >&2; }
+die()  { printf 'ymir: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'ymir: %s\n' "$*" >&2; }
 log()  { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >>"$LOG_FILE"; }
 
 load_cfg() {
   mkdir -p "$CFG_DIR"
   [ -f "$CFG_FILE" ] && . "$CFG_FILE"
   [ "$TRANSPORT" = "local" ] && { [ -n "$HUB_ROOT" ] || die "TRANSPORT=local requires HUB_ROOT"; return; }
-  [ -n "$HUB_USER" ] || die "HUB_USER not set. Edit $CFG_FILE (see 'ymirr init')."
+  [ -n "$HUB_USER" ] || die "HUB_USER not set. Edit $CFG_FILE (see 'ymir init')."
 }
 
 # Run a command string in the hub's shell.
@@ -106,7 +106,7 @@ cmd_init() {
   mkdir -p "$CFG_DIR"
   if [ -f "$CFG_FILE" ]; then warn "config already exists at $CFG_FILE"; return; fi
   cat >"$CFG_FILE" <<EOF
-# ymirr config ($(hostname))
+# ymir config ($(hostname))
 HUB_HOST="macminim4"     # hub MagicDNS name (Tailscale)
 HUB_USER=""              # REQUIRED: run 'id -un' on the hub and paste it here
 TRANSPORT="ssh"          # ssh | local
@@ -114,12 +114,12 @@ MIRROR="0"               # 1 => delete files on this machine that are gone on th
 INTERVAL="300"           # launchd sync interval (seconds)
 HUB_RSYNC_PATH=""        # e.g. /opt/homebrew/bin/rsync if the hub has GNU rsync
 EOF
-  printf 'Wrote %s\nSet HUB_USER, then: ymirr status\n' "$CFG_FILE"
+  printf 'Wrote %s\nSet HUB_USER, then: ymir status\n' "$CFG_FILE"
 }
 
 cmd_add() {
   local force=0; [ "${1:-}" = "--force" ] && { force=1; shift; }
-  [ $# -ge 1 ] || die "usage: ymirr add [--force] <path>..."
+  [ $# -ge 1 ] || die "usage: ymir add [--force] <path>..."
   build_excludes
   local in rel rb
   rb="$(rsync_bin)"
@@ -143,13 +143,13 @@ cmd_add() {
       fi
     fi
     # register in hub manifest (deduped)
-    hub_exec "mkdir -p \$HOME/.config/ymirr; touch $REMOTE_MANIFEST; grep -qxF -- '$rel' $REMOTE_MANIFEST || printf '%s\n' '$rel' >> $REMOTE_MANIFEST"
+    hub_exec "mkdir -p \$HOME/.config/ymir; touch $REMOTE_MANIFEST; grep -qxF -- '$rel' $REMOTE_MANIFEST || printf '%s\n' '$rel' >> $REMOTE_MANIFEST"
     printf 'added: %s\n' "$rel"
   done
 }
 
 cmd_rm() {
-  [ $# -ge 1 ] || die "usage: ymirr rm <path>..."
+  [ $# -ge 1 ] || die "usage: ymir rm <path>..."
   local in rel
   for in in "$@"; do
     rel="$(to_rel "$in")"
@@ -203,7 +203,7 @@ cmd_status() {
 }
 
 cmd_install_agent() {
-  local self plist label="com.ymirr.sync"
+  local self plist label="com.ymir.sync"
   self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
   plist="$HOME/Library/LaunchAgents/$label.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
@@ -226,7 +226,7 @@ EOF
 }
 
 cmd_uninstall_agent() {
-  local plist="$HOME/Library/LaunchAgents/com.ymirr.sync.plist"
+  local plist="$HOME/Library/LaunchAgents/com.ymir.sync.plist"
   launchctl unload "$plist" 2>/dev/null || true
   rm -f "$plist"
   echo "removed launchd agent"
@@ -234,15 +234,15 @@ cmd_uninstall_agent() {
 
 usage() {
   cat <<'EOF'
-ymirr - pull-sync a managed list of config paths from a hub over Tailscale.
+ymir - pull-sync a managed list of config paths from a hub over Tailscale.
 
 USAGE
-  ymirr <command> [args]
-  ymirr <command> --help      detailed help for one command
-  ymirr help [command]        this overview, or help for a command
+  ymir <command> [args]
+  ymir <command> --help      detailed help for one command
+  ymir help [command]        this overview, or help for a command
 
 COMMANDS
-  init                 write the config template (~/.config/ymirr/config)
+  init                 write the config template (~/.config/ymir/config)
   add [--force] PATH.. register path(s) in the hub manifest (seeds new ones up)
   rm PATH..            unregister path(s); the local copy is kept
   list                 show managed paths (from the hub manifest)
@@ -257,30 +257,30 @@ MODEL
   owns the manifest + canonical files. Paths are stored HOME-relative so different
   local usernames map correctly. Files stay in place; secrets are excluded.
 
-CONFIG   ~/.config/ymirr/config   (run `ymirr init` to create it)
+CONFIG   ~/.config/ymir/config   (run `ymir init` to create it)
   HUB_HOST HUB_USER TRANSPORT MIRROR INTERVAL HUB_RSYNC_PATH
 
-Full guide: docs/GUIDE.md in the ymirr repo.
+Full guide: docs/GUIDE.md in the ymir repo.
 EOF
 }
 
 help_topic() {
   case "$1" in
     init) cat <<'EOF'
-ymirr init - write the config template.
+ymir init - write the config template.
 
-  Creates ~/.config/ymirr/config with commented defaults if it does not exist.
+  Creates ~/.config/ymir/config with commented defaults if it does not exist.
   Does NOT overwrite an existing config. After running it, set HUB_USER to the
   hub's local macOS account name (run `id -un` on the hub to find it).
 
   Example:
-    ymirr init
-    $EDITOR ~/.config/ymirr/config    # set HUB_USER="..."
-    ymirr status
+    ymir init
+    $EDITOR ~/.config/ymir/config    # set HUB_USER="..."
+    ymir status
 EOF
 ;;
     add) cat <<'EOF'
-ymirr add [--force] PATH...
+ymir add [--force] PATH...
 
   Register one or more paths in the hub manifest so they get synced. A path may be
   absolute, ~-relative, or relative to the current directory. Paths under your home
@@ -296,31 +296,31 @@ ymirr add [--force] PATH...
   Run from any Mac: the manifest lives on the hub, so the managed set is shared.
 
   Examples:
-    ymirr add ~/.zshrc ~/.config/nvim
-    ymirr add ~/.config/ghostty          # a directory (synced recursively)
-    ymirr add --force ~/.config/app/token.env
+    ymir add ~/.zshrc ~/.config/nvim
+    ymir add ~/.config/ghostty          # a directory (synced recursively)
+    ymir add --force ~/.config/app/token.env
 EOF
 ;;
     rm|remove) cat <<'EOF'
-ymirr rm PATH...
+ymir rm PATH...
 
   Remove path(s) from the hub manifest so they stop syncing. Your local copy and the
   hub copy are BOTH left in place; only the manifest entry is deleted. Accepts the
   same path forms as `add`.
 
   Example:
-    ymirr rm ~/.zshrc
+    ymir rm ~/.zshrc
 EOF
 ;;
     list|ls) cat <<'EOF'
-ymirr list
+ymir list
 
   Print the managed paths, read live from the hub manifest
-  (~/.config/ymirr/paths.list on the hub). Requires the hub to be reachable.
+  (~/.config/ymir/paths.list on the hub). Requires the hub to be reachable.
 EOF
 ;;
     sync) cat <<'EOF'
-ymirr sync
+ymir sync
 
   Pull every managed path from the hub to this machine with rsync. Directories are
   synced recursively. Secret patterns are always excluded. Parent directories are
@@ -333,22 +333,22 @@ ymirr sync
 EOF
 ;;
     status) cat <<'EOF'
-ymirr status
+ymir status
 
   Show the configured hub (user@host, transport), whether it is reachable, how many
   paths are managed, and when the last sync ran.
 EOF
 ;;
     install-agent) cat <<'EOF'
-ymirr install-agent
+ymir install-agent
 
-  Write and load a launchd agent (~/Library/LaunchAgents/com.ymirr.sync.plist) that
-  runs `ymirr sync` at login and every INTERVAL seconds (default 300). Re-running it
-  reloads the agent with the current INTERVAL. Output goes to the ymirr log.
+  Write and load a launchd agent (~/Library/LaunchAgents/com.ymir.sync.plist) that
+  runs `ymir sync` at login and every INTERVAL seconds (default 300). Re-running it
+  reloads the agent with the current INTERVAL. Output goes to the ymir log.
 EOF
 ;;
     uninstall-agent) cat <<'EOF'
-ymirr uninstall-agent
+ymir uninstall-agent
 
   Unload and delete the launchd agent. Does not touch your config or synced files.
 EOF
