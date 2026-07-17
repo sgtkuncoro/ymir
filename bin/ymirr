@@ -234,24 +234,133 @@ cmd_uninstall_agent() {
 
 usage() {
   cat <<'EOF'
-ymirr - pull-sync a managed list of paths from a hub over Tailscale
+ymirr - pull-sync a managed list of config paths from a hub over Tailscale.
 
-  ymirr init                 write config template (~/.config/ymirr/config)
-  ymirr add [--force] PATH.. register path(s) in the hub manifest (seeds if new)
-  ymirr rm PATH..            unregister path(s) (local copy kept)
-  ymirr list                 show managed paths
-  ymirr sync                 pull all managed paths hub -> this machine
-  ymirr status               hub reachability, count, last sync
-  ymirr install-agent        launchd agent to sync on an interval
-  ymirr uninstall-agent      remove the launchd agent
+USAGE
+  ymirr <command> [args]
+  ymirr <command> --help      detailed help for one command
+  ymirr help [command]        this overview, or help for a command
 
-Paths are stored HOME-relative. Secrets are excluded by default.
-Set MIRROR=1 in the config to allow deletion of local files removed on the hub.
+COMMANDS
+  init                 write the config template (~/.config/ymirr/config)
+  add [--force] PATH.. register path(s) in the hub manifest (seeds new ones up)
+  rm PATH..            unregister path(s); the local copy is kept
+  list                 show managed paths (from the hub manifest)
+  sync                 pull every managed path: hub -> this machine
+  status               hub reachability, managed count, last sync time
+  install-agent        install a launchd agent that runs `sync` on an interval
+  uninstall-agent      remove the launchd agent
+  help, --help, -h     show this overview
+
+MODEL
+  One-way pull. The hub (HUB_HOST, default macminim4) is the source of truth and
+  owns the manifest + canonical files. Paths are stored HOME-relative so different
+  local usernames map correctly. Files stay in place; secrets are excluded.
+
+CONFIG   ~/.config/ymirr/config   (run `ymirr init` to create it)
+  HUB_HOST HUB_USER TRANSPORT MIRROR INTERVAL HUB_RSYNC_PATH
+
+Full guide: docs/GUIDE.md in the ymirr repo.
 EOF
+}
+
+help_topic() {
+  case "$1" in
+    init) cat <<'EOF'
+ymirr init - write the config template.
+
+  Creates ~/.config/ymirr/config with commented defaults if it does not exist.
+  Does NOT overwrite an existing config. After running it, set HUB_USER to the
+  hub's local macOS account name (run `id -un` on the hub to find it).
+
+  Example:
+    ymirr init
+    $EDITOR ~/.config/ymirr/config    # set HUB_USER="..."
+    ymirr status
+EOF
+;;
+    add) cat <<'EOF'
+ymirr add [--force] PATH...
+
+  Register one or more paths in the hub manifest so they get synced. A path may be
+  absolute, ~-relative, or relative to the current directory. Paths under your home
+  are stored HOME-relative (e.g. ".config/nvim"); paths outside home are stored
+  absolute and will NOT remap across machines with different usernames.
+
+  Seeding: if the path exists locally but not yet on the hub, its current content is
+  pushed up to the hub once, making the hub the source of truth from then on.
+
+  Secret guard: paths matching secret patterns (.ssh/*, id_rsa, *.pem, *.key,
+  .aws/credentials, *.env, ...) are refused. Use --force to add one anyway.
+
+  Run from any Mac: the manifest lives on the hub, so the managed set is shared.
+
+  Examples:
+    ymirr add ~/.zshrc ~/.config/nvim
+    ymirr add ~/.config/ghostty          # a directory (synced recursively)
+    ymirr add --force ~/.config/app/token.env
+EOF
+;;
+    rm|remove) cat <<'EOF'
+ymirr rm PATH...
+
+  Remove path(s) from the hub manifest so they stop syncing. Your local copy and the
+  hub copy are BOTH left in place; only the manifest entry is deleted. Accepts the
+  same path forms as `add`.
+
+  Example:
+    ymirr rm ~/.zshrc
+EOF
+;;
+    list|ls) cat <<'EOF'
+ymirr list
+
+  Print the managed paths, read live from the hub manifest
+  (~/.config/ymirr/paths.list on the hub). Requires the hub to be reachable.
+EOF
+;;
+    sync) cat <<'EOF'
+ymirr sync
+
+  Pull every managed path from the hub to this machine with rsync. Directories are
+  synced recursively. Secret patterns are always excluded. Parent directories are
+  created as needed. Records the timestamp for `status` and logs to the config dir.
+
+  MIRROR=1 in the config adds `rsync --delete`, so files removed on the hub are also
+  deleted here (destructive). Default MIRROR=0 only adds/updates, never deletes.
+
+  This is the command the launchd agent runs on an interval.
+EOF
+;;
+    status) cat <<'EOF'
+ymirr status
+
+  Show the configured hub (user@host, transport), whether it is reachable, how many
+  paths are managed, and when the last sync ran.
+EOF
+;;
+    install-agent) cat <<'EOF'
+ymirr install-agent
+
+  Write and load a launchd agent (~/Library/LaunchAgents/com.ymirr.sync.plist) that
+  runs `ymirr sync` at login and every INTERVAL seconds (default 300). Re-running it
+  reloads the agent with the current INTERVAL. Output goes to the ymirr log.
+EOF
+;;
+    uninstall-agent) cat <<'EOF'
+ymirr uninstall-agent
+
+  Unload and delete the launchd agent. Does not touch your config or synced files.
+EOF
+;;
+    *) usage ;;
+  esac
 }
 
 main() {
   local sub="${1:-help}"; shift || true
+  # Per-command help must work without loading config (never die on unset HUB_USER).
+  case "${1:-}" in -h|--help) help_topic "$sub"; exit 0 ;; esac
   case "$sub" in
     init)            cmd_init "$@" ;;
     add)             load_cfg; cmd_add "$@" ;;
@@ -261,7 +370,8 @@ main() {
     status)          load_cfg; cmd_status "$@" ;;
     install-agent)   load_cfg; cmd_install_agent "$@" ;;
     uninstall-agent) cmd_uninstall_agent "$@" ;;
-    help|-h|--help)  usage ;;
+    help)            [ $# -ge 1 ] && help_topic "$1" || usage ;;
+    -h|--help)       usage ;;
     *)               usage; exit 1 ;;
   esac
 }

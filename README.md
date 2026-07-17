@@ -3,6 +3,8 @@
 Pull-sync a **managed, add/removable list** of config paths from one hub to your other
 Macs, entirely over your Tailscale tailnet. No cloud, no public exposure.
 
+> Full documentation: [docs/GUIDE.md](docs/GUIDE.md) - concepts, internals, every command, automation, security, troubleshooting, FAQ.
+
 - **Hub** (`macminim4`) is the source of truth: it owns the manifest and canonical files.
 - **Spokes** pull the manifest and every listed path from the hub.
 - Paths are stored **HOME-relative**, so different local usernames map correctly
