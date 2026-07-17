@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+#
+# ymirr - sync/mirror a managed list of paths across a Tailscale tailnet.
+#
+# Model: one-way PULL from a single hub (source of truth) to this machine.
+#   - The hub owns the manifest (~/.config/ymirr/paths.list) and the canonical files.
+#   - Paths are stored HOME-relative, so a hub user (e.g. "sk") and a local user
+#     (e.g. "sky0") map correctly even though /Users/<name> differs.
+#   - `add`/`rm`/`list` edit the hub manifest. `sync` pulls hub -> local.
+#   - Files are kept in place (no symlinks). Secrets are excluded by default.
+#
+# Transport: ssh over Tailscale (hub reached by its MagicDNS name). A `local`
+# transport exists for testing (treats $HUB_ROOT as a fake hub home).
+#
+set -euo pipefail
+
+CFG_DIR="${YMIRR_CFG_DIR:-$HOME/.config/ymirr}"
+CFG_FILE="$CFG_DIR/config"
+LOCAL_MANIFEST="$CFG_DIR/paths.list.cache"
+STATE_FILE="$CFG_DIR/last-sync"
+LOG_FILE="${YMIRR_LOG:-$CFG_DIR/ymirr.log}"
+
+# --- defaults (overridable in $CFG_FILE) ---------------------------------
+HUB_HOST="macminim4"
+HUB_USER=""              # REQUIRED: local macOS username on the hub
+TRANSPORT="ssh"         # ssh | local
+HUB_ROOT=""             # only for TRANSPORT=local: path acting as hub $HOME
+MIRROR="0"              # 1 => rsync --delete (destructive on the receiver)
+INTERVAL="300"          # launchd StartInterval seconds
+HUB_RSYNC_PATH=""       # optional --rsync-path for the hub (e.g. /opt/homebrew/bin/rsync)
+SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+# Secret patterns excluded from every transfer AND blocked by `add` (use --force).
+SECRET_PATTERNS=(
+  ".ssh/*" "id_rsa" "id_ed25519" "*.pem" "*.key" "*.p12" "*.pfx"
+  "*.keychain*" ".aws/credentials" ".gnupg/*" ".netrc" "*.env" ".env"
+)
+
+REMOTE_MANIFEST='$HOME/.config/ymirr/paths.list'   # expanded on the hub
+
+# --- helpers -------------------------------------------------------------
+die()  { printf 'ymirr: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'ymirr: %s\n' "$*" >&2; }
+log()  { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >>"$LOG_FILE"; }
+
+load_cfg() {
+  mkdir -p "$CFG_DIR"
+  [ -f "$CFG_FILE" ] && . "$CFG_FILE"
+  [ "$TRANSPORT" = "local" ] && { [ -n "$HUB_ROOT" ] || die "TRANSPORT=local requires HUB_ROOT"; return; }
+  [ -n "$HUB_USER" ] || die "HUB_USER not set. Edit $CFG_FILE (see 'ymirr init')."
+}
+
+# Run a command string in the hub's shell.
+hub_exec() {
+  case "$TRANSPORT" in
+    ssh)   ssh $SSH_OPTS "$HUB_USER@$HUB_HOST" "$1" ;;
+    local) ( export HOME="$HUB_ROOT"; bash -c "$1" ) ;;
+    *)     die "unknown TRANSPORT: $TRANSPORT" ;;
+  esac
+}
+
+rsync_bin() { command -v /opt/homebrew/bin/rsync >/dev/null 2>&1 && echo /opt/homebrew/bin/rsync || echo rsync; }
+
+# Build an rsync --exclude args array into global REX.
+build_excludes() {
+  REX=()
+  local p
+  for p in "${SECRET_PATTERNS[@]}"; do REX+=(--exclude="$p"); done
+}
+
+# Normalise an input path to a HOME-relative entry (or absolute if outside HOME).
+to_rel() {
+  local in="$1" abs
+  case "$in" in
+    "~/"*) in="$HOME/${in#\~/}" ;;
+    "~")   in="$HOME" ;;
+  esac
+  # absolutise without requiring existence
+  case "$in" in
+    /*) abs="$in" ;;
+    *)  abs="$PWD/$in" ;;
+  esac
+  # strip trailing slash
+  abs="${abs%/}"
+  case "$abs/" in
+    "$HOME/"*) printf '%s' "${abs#$HOME/}" ;;
+    *)         printf '%s' "$abs" ;;  # outside HOME: keep absolute (won't remap)
+  esac
+}
+
+is_secret() {
+  local rel="$1" base pat
+  base="$(basename "$rel")"
+  for pat in "${SECRET_PATTERNS[@]}"; do
+    # shellcheck disable=SC2053
+    case "$rel"  in $pat) return 0 ;; esac
+    case "$base" in $pat) return 0 ;; esac
+  done
+  return 1
+}
+
+read_manifest() { hub_exec "cat $REMOTE_MANIFEST 2>/dev/null" | sed '/^\s*#/d; /^\s*$/d'; }
+
+# --- commands ------------------------------------------------------------
+cmd_init() {
+  mkdir -p "$CFG_DIR"
+  if [ -f "$CFG_FILE" ]; then warn "config already exists at $CFG_FILE"; return; fi
+  cat >"$CFG_FILE" <<EOF
+# ymirr config ($(hostname))
+HUB_HOST="macminim4"     # hub MagicDNS name (Tailscale)
+HUB_USER=""              # REQUIRED: run 'id -un' on the hub and paste it here
+TRANSPORT="ssh"          # ssh | local
+MIRROR="0"               # 1 => delete files on this machine that are gone on the hub
+INTERVAL="300"           # launchd sync interval (seconds)
+HUB_RSYNC_PATH=""        # e.g. /opt/homebrew/bin/rsync if the hub has GNU rsync
+EOF
+  printf 'Wrote %s\nSet HUB_USER, then: ymirr status\n' "$CFG_FILE"
+}
+
+cmd_add() {
+  local force=0; [ "${1:-}" = "--force" ] && { force=1; shift; }
+  [ $# -ge 1 ] || die "usage: ymirr add [--force] <path>..."
+  build_excludes
+  local in rel rb
+  rb="$(rsync_bin)"
+  for in in "$@"; do
+    rel="$(to_rel "$in")"
+    if is_secret "$rel" && [ "$force" -ne 1 ]; then
+      warn "refusing secret-looking path '$rel' (use --force to override): skipped"; continue
+    fi
+    # seed: if present locally but missing on hub, push it up once
+    if [ -e "$HOME/$rel" ]; then
+      if ! hub_exec "test -e \$HOME/$rel"; then
+        warn "seeding '$rel' -> hub"
+        case "$TRANSPORT" in
+          ssh)
+            hub_exec "mkdir -p \$HOME/$(dirname "$rel")"
+            "$rb" -a "${REX[@]}" -e "ssh $SSH_OPTS" "$HOME/$rel" "$HUB_USER@$HUB_HOST:$(dirname "$rel")/" ;;
+          local)
+            mkdir -p "$HUB_ROOT/$(dirname "$rel")"
+            "$rb" -a "${REX[@]}" "$HOME/$rel" "$HUB_ROOT/$(dirname "$rel")/" ;;
+        esac
+      fi
+    fi
+    # register in hub manifest (deduped)
+    hub_exec "mkdir -p \$HOME/.config/ymirr; touch $REMOTE_MANIFEST; grep -qxF -- '$rel' $REMOTE_MANIFEST || printf '%s\n' '$rel' >> $REMOTE_MANIFEST"
+    printf 'added: %s\n' "$rel"
+  done
+}
+
+cmd_rm() {
+  [ $# -ge 1 ] || die "usage: ymirr rm <path>..."
+  local in rel
+  for in in "$@"; do
+    rel="$(to_rel "$in")"
+    hub_exec "test -f $REMOTE_MANIFEST && grep -vxF -- '$rel' $REMOTE_MANIFEST > $REMOTE_MANIFEST.tmp && mv $REMOTE_MANIFEST.tmp $REMOTE_MANIFEST || true"
+    printf 'removed from manifest (local copy kept): %s\n' "$rel"
+  done
+}
+
+cmd_list() {
+  local m; m="$(read_manifest || true)"
+  [ -n "$m" ] && printf '%s\n' "$m" || echo "(manifest empty)"
+}
+
+cmd_sync() {
+  build_excludes
+  local rb rel n=0 fail=0 delflag=() ; rb="$(rsync_bin)"
+  [ "$MIRROR" = "1" ] && delflag=(--delete)
+  local rpath=(); [ -n "$HUB_RSYNC_PATH" ] && rpath=(--rsync-path="$HUB_RSYNC_PATH")
+  local manifest; manifest="$(read_manifest)" || die "cannot read hub manifest (hub unreachable?)"
+  # cache manifest locally
+  printf '%s\n' "$manifest" > "$LOCAL_MANIFEST"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    local isdir src dst
+    isdir="$(hub_exec "test -d \$HOME/$rel && echo 1 || echo 0")"
+    mkdir -p "$HOME/$(dirname "$rel")"
+    if [ "$isdir" = "1" ]; then src_suffix="/"; else src_suffix=""; fi
+    case "$TRANSPORT" in
+      ssh)
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
+              "$HUB_USER@$HUB_HOST:$rel$src_suffix" "$HOME/$rel$src_suffix"; then
+          n=$((n+1)); else warn "sync failed: $rel"; fail=$((fail+1)); fi ;;
+      local)
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} "${REX[@]}" \
+              "$HUB_ROOT/$rel$src_suffix" "$HOME/$rel$src_suffix"; then
+          n=$((n+1)); else warn "sync failed: $rel"; fail=$((fail+1)); fi ;;
+    esac
+  done <<< "$manifest"
+  date '+%Y-%m-%dT%H:%M:%S' > "$STATE_FILE"
+  log "sync ok=$n fail=$fail mirror=$MIRROR"
+  printf 'synced %d path(s), %d failed. mirror=%s\n' "$n" "$fail" "$MIRROR"
+  [ "$fail" -eq 0 ]
+}
+
+cmd_status() {
+  printf 'hub:       %s@%s (transport=%s)\n' "${HUB_USER:-?}" "$HUB_HOST" "$TRANSPORT"
+  if hub_exec "echo ok" >/dev/null 2>&1; then echo "reachable: yes"; else echo "reachable: NO"; fi
+  local c; c="$(read_manifest 2>/dev/null | grep -c . || true)"
+  printf 'managed:   %s path(s)\n' "${c:-0}"
+  [ -f "$STATE_FILE" ] && printf 'last sync: %s\n' "$(cat "$STATE_FILE")" || echo "last sync: never"
+}
+
+cmd_install_agent() {
+  local self plist label="com.ymirr.sync"
+  self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$label</string>
+  <key>ProgramArguments</key>
+  <array><string>$self</string><string>sync</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>$INTERVAL</integer>
+  <key>StandardOutPath</key><string>$LOG_FILE</string>
+  <key>StandardErrorPath</key><string>$LOG_FILE</string>
+</dict></plist>
+EOF
+  launchctl unload "$plist" 2>/dev/null || true
+  launchctl load "$plist"
+  printf 'installed launchd agent: %s (every %ss)\n' "$plist" "$INTERVAL"
+}
+
+cmd_uninstall_agent() {
+  local plist="$HOME/Library/LaunchAgents/com.ymirr.sync.plist"
+  launchctl unload "$plist" 2>/dev/null || true
+  rm -f "$plist"
+  echo "removed launchd agent"
+}
+
+usage() {
+  cat <<'EOF'
+ymirr - pull-sync a managed list of paths from a hub over Tailscale
+
+  ymirr init                 write config template (~/.config/ymirr/config)
+  ymirr add [--force] PATH.. register path(s) in the hub manifest (seeds if new)
+  ymirr rm PATH..            unregister path(s) (local copy kept)
+  ymirr list                 show managed paths
+  ymirr sync                 pull all managed paths hub -> this machine
+  ymirr status               hub reachability, count, last sync
+  ymirr install-agent        launchd agent to sync on an interval
+  ymirr uninstall-agent      remove the launchd agent
+
+Paths are stored HOME-relative. Secrets are excluded by default.
+Set MIRROR=1 in the config to allow deletion of local files removed on the hub.
+EOF
+}
+
+main() {
+  local sub="${1:-help}"; shift || true
+  case "$sub" in
+    init)            cmd_init "$@" ;;
+    add)             load_cfg; cmd_add "$@" ;;
+    rm|remove)       load_cfg; cmd_rm "$@" ;;
+    list|ls)         load_cfg; cmd_list "$@" ;;
+    sync)            load_cfg; cmd_sync "$@" ;;
+    status)          load_cfg; cmd_status "$@" ;;
+    install-agent)   load_cfg; cmd_install_agent "$@" ;;
+    uninstall-agent) cmd_uninstall_agent "$@" ;;
+    help|-h|--help)  usage ;;
+    *)               usage; exit 1 ;;
+  esac
+}
+main "$@"
