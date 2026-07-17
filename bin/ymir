@@ -140,6 +140,21 @@ to_rel() {
   esac
 }
 
+# Normalise a SHARE / catalog reference to a HOME-relative key, INDEPENDENT of $PWD.
+# (A share name is the key shown by `ymir pubs`, e.g. ".config/nvim" - not a cwd path.)
+to_share() {
+  local in="$1"
+  # shellcheck disable=SC2088  # literal "~/" match is intended, not expansion
+  case "$in" in
+    "~/"*)      in="${in#\~/}" ;;
+    "~")        in="" ;;
+    "$HOME/"*)  in="${in#"$HOME"/}" ;;
+    ./*)        in="${in#./}" ;;
+    /*)         : ;;                 # absolute outside home: leave (will not match catalog)
+  esac
+  printf '%s' "${in%/}"
+}
+
 is_secret() {
   local rel="$1" base pat
   base="$(basename "$rel")"
@@ -271,7 +286,7 @@ cmd_share() {
   mkdir -p "$CFG_DIR"; touch "$CATALOG_FILE"
   local in rel
   for in in "$@"; do
-    rel="$(to_rel "$in")"
+    rel="$(to_share "$in")"
     if is_secret "$rel" && [ "$force" -ne 1 ]; then
       warn "refusing secret-looking path '$rel' (use --force): skipped"; continue
     fi
@@ -285,7 +300,7 @@ cmd_unshare() {
   [ $# -ge 1 ] || die "usage: ymir unshare <path>..."
   local in rel
   for in in "$@"; do
-    rel="$(to_rel "$in")"
+    rel="$(to_share "$in")"
     if [ -f "$CATALOG_FILE" ]; then
       grep -vxF -- "$rel" "$CATALOG_FILE" > "$CATALOG_FILE.tmp" 2>/dev/null || true
       mv "$CATALOG_FILE.tmp" "$CATALOG_FILE"
@@ -333,7 +348,7 @@ cmd_subscribe() {
   if [ -n "$to" ]; then
     [ $# -eq 1 ] || die "--to takes exactly one share (use: --from SHARE --to DEST)"
     local src dest line
-    src="$(to_rel "$1")"; dest="$(to_rel "$to")"
+    src="$(to_share "$1")"; dest="$(to_share "$to")"
     dest_ok "$dest" || die "unsafe destination (escapes home): $to"
     line="$src -> $dest"
     [ -n "$cat" ] && ! in_catalog "$cat" "$src" && warn "note: '$src' is not in the hub catalog yet"
@@ -342,7 +357,7 @@ cmd_subscribe() {
   else
     local in src
     for in in "$@"; do
-      src="$(to_rel "$in")"
+      src="$(to_share "$in")"
       [ -n "$cat" ] && ! in_catalog "$cat" "$src" && warn "note: '$src' is not in the hub catalog yet"
       grep -qxF -- "$src" "$SUBS_FILE" || printf '%s\n' "$src" >> "$SUBS_FILE"
       echo "subscribed: $src"
@@ -355,7 +370,7 @@ cmd_unsubscribe() {
   [ -f "$SUBS_FILE" ] || { echo "no subscriptions"; return 0; }
   local in src line tmp
   for in in "$@"; do
-    src="$(to_rel "$in")"; tmp="$SUBS_FILE.tmp"; : > "$tmp"
+    src="$(to_share "$in")"; tmp="$SUBS_FILE.tmp"; : > "$tmp"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       parse_entry "$line"
@@ -383,7 +398,7 @@ cmd_publish() {
   build_excludes
   local rb lrel share suffix; rb="$(rsync_bin)"
   lrel="$(to_rel "$1")"
-  if [ -n "$as" ]; then share="$(to_rel "$as")"; else share="$lrel"; fi
+  if [ -n "$as" ]; then share="$(to_share "$as")"; else share="$lrel"; fi
   [ -e "$HOME/$lrel" ] || die "no such local path: $HOME/$lrel"
   is_secret "$share" && die "refusing to publish secret-looking path: $share (rename or curate on the hub)"
   [ -d "$HOME/$lrel" ] && suffix="/" || suffix=""

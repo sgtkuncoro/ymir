@@ -34,4 +34,13 @@ bad_rc dest_ok "/etc/x"
 bad_rc dest_ok "../x"
 bad_rc dest_ok "a/../b"
 
+# to_share: HOME-relative catalog key, independent of $PWD
+ck to_share-bare   "$(to_share ".config/nvim")" ".config/nvim"
+# shellcheck disable=SC2088  # literal "~/" is the input under test
+ck to_share-tilde  "$(to_share "~/.omp/agent")" ".omp/agent"
+ck to_share-home   "$(to_share "$HOME/.z")"     ".z"
+ck to_share-dotsl  "$(to_share "./x/")"         "x"
+ck to_share-abs    "$(to_share "/etc/x")"       "/etc/x"
+( cd /tmp && ck to_share-cwdindep "$(to_share ".config/nvim")" ".config/nvim" )
+
 exit $fail

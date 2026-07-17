@@ -158,6 +158,9 @@ Every command also has `ymir <command> --help`.
 ### Spoke (subscribe)
 - `ymir pubs` - show what the hub publishes.
 - `ymir sub [--from SHARE] [--to DEST] SHARE...` - subscribe; `--from` names the hub source, `--to` the local placement. Positional SHARE also works. (alias: `add`)
+  - `SHARE` is a catalog key as shown by `ymir pubs` (HOME-relative on the hub), and is
+    resolved independently of your current directory. `--to` is HOME-relative too
+    (`~/x`, a bare `x`, and `$HOME/x` all mean the same; absolute/`..` are rejected).
 - `ymir sub --all` - subscribe to everything published (same paths).
 - `ymir unsub SHARE...` - unsubscribe (matches the SHARE field only). (alias: `rm`)
 - `ymir subs` - show subscriptions (`SHARE -> DEST`). (alias: `list`)
