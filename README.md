@@ -23,7 +23,7 @@ brew install rsync                 # GNU rsync (once)
 
 `ymir setup` checks prerequisites, asks whether this machine is the HUB or a SPOKE,
 collects `HUB_HOST`/`HUB_USER`, writes `~/.config/ymir/config`, offers to symlink
-`ymir` onto your PATH, tests hub reachability, and can install the launchd agent.
+`ymir` onto your PATH, verifies the hub connection (spoke), and can install the launchd agent.
 
 Manual equivalent, if you prefer:
 

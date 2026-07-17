@@ -184,8 +184,9 @@ Every command also has `ymir <command> --help`.
 Guided interactive setup and the recommended way to start. Checks Tailscale + GNU rsync
 (offers to install rsync), asks whether this machine is the HUB or a SPOKE, collects
 `HUB_HOST`/`HUB_USER`, writes `~/.config/ymir/config`, optionally symlinks `ymir` onto
-PATH, tests hub reachability, and optionally installs the launchd agent. Re-runnable
-(asks before overwriting); falls back to defaults when run non-interactively.
+PATH, and optionally installs the launchd agent. For a spoke it verifies `HUB_USER` with
+a live SSH test and re-prompts until it connects. Re-runnable (asks before overwriting);
+falls back to defaults when run non-interactively.
 ```sh
 ymir setup
 ```

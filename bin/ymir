@@ -68,7 +68,7 @@ load_cfg() {
     TRANSPORT="local"; HUB_ROOT="$HOME"; return
   fi
   [ "$TRANSPORT" = "local" ] && { [ -n "$HUB_ROOT" ] || die "TRANSPORT=local requires HUB_ROOT"; return; }
-  [ -n "$HUB_USER" ] || die "HUB_USER not set. Edit $CFG_FILE (see 'ymir init')."
+  [ -n "$HUB_USER" ] || die "HUB_USER not set. Run 'ymir setup' (or set HUB_USER in $CFG_FILE)."
 }
 
 # Run a command string in the hub's shell.
@@ -159,16 +159,26 @@ cmd_setup() {
   local role ishub="0" hubhost="$HUB_HOST" hubuser="" rsyncpath=""
   ask role "Is this machine the HUB (curate here) or a SPOKE (receives config)? (hub/spoke)" "spoke"
   case "$role" in hub|HUB|h|H) ishub="1" ;; *) ishub="0" ;; esac
-  command -v /opt/homebrew/bin/rsync >/dev/null 2>&1 && rsyncpath="/opt/homebrew/bin/rsync"
 
   if [ "$ishub" = "1" ]; then
     ask hubhost "Label for this hub (cosmetic)" "$(scutil --get LocalHostName 2>/dev/null || echo "$HUB_HOST")"
-    echo "This machine will be the source of truth; 'sync' here is a no-op." >&2
+    echo "[ok] hub account: $(id -un) (this machine is the source of truth)" >&2
   else
     ask hubhost "Hub MagicDNS name (Tailscale)" "$HUB_HOST"
-    echo "Tip: on the hub run 'id -un' to get its local account name." >&2
-    ask hubuser "Hub local macOS username (HUB_USER)" ""
-    [ -n "$hubuser" ] || warn "HUB_USER left empty - set it in $CFG_FILE before 'ymir sync'"
+    hubuser="$USER"
+    while : ; do
+      ask hubuser "Hub local macOS username (run 'id -un' on the hub)" "$hubuser"
+      if [ -n "$hubuser" ] && ssh $SSH_OPTS "$hubuser@$hubhost" "echo ok" >/dev/null 2>&1; then
+        echo "[ok] connected as $hubuser@$hubhost" >&2
+        ssh $SSH_OPTS "$hubuser@$hubhost" "command -v /opt/homebrew/bin/rsync >/dev/null 2>&1" \
+          && rsyncpath="/opt/homebrew/bin/rsync"
+        break
+      fi
+      [ -n "$hubuser" ] && warn "could not connect as '$hubuser@$hubhost'"
+      echo "  hint: on the hub run 'id -un', and ensure 'sudo tailscale set --ssh' there" >&2
+      [ -t 0 ] || { warn "non-interactive: leaving HUB_USER='$hubuser' (verify later with 'ymir status')"; break; }
+      confirm "Try again with a different username?" Y || { warn "you can set HUB_USER later in $CFG_FILE"; break; }
+    done
   fi
 
   # 3. write config
@@ -206,11 +216,6 @@ Hub setup done. Next:
   (then on each laptop)  ymir setup  ->  ymir sync
 EOF
   else
-    if [ -n "$hubuser" ]; then
-      if ssh $SSH_OPTS "$hubuser@$hubhost" "echo ok" >/dev/null 2>&1; then
-        echo "[ok] hub reachable: $hubuser@$hubhost" >&2
-      else warn "cannot reach $hubuser@$hubhost yet (check HUB_USER and Tailscale SSH on the hub)"; fi
-    fi
     if confirm "Install the launchd auto-sync agent now?" Y; then cmd_install_agent || true; fi
     cat >&2 <<'EOF'
 Spoke setup done. Next:
@@ -381,9 +386,10 @@ help_topic() {
 ymir setup - guided interactive setup.
 
   Walks you through everything: checks Tailscale + GNU rsync (offers to install
-  rsync), asks whether this machine is the HUB or a SPOKE, collects HUB_HOST and
-  (for a spoke) HUB_USER, writes ~/.config/ymir/config, optionally symlinks `ymir`
-  onto your PATH, tests hub reachability, and optionally installs the launchd agent.
+  rsync), asks whether this machine is the HUB or a SPOKE. For a spoke it verifies
+  HUB_USER with a live SSH test and re-prompts until it connects, then writes
+  ~/.config/ymir/config, optionally symlinks `ymir` onto PATH, and optionally
+  installs the launchd agent.
 
   Re-runnable; it asks before overwriting an existing config. Prompts fall back to
   defaults when run non-interactively.
