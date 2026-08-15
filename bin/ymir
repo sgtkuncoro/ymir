@@ -86,8 +86,8 @@ load_cfg() {
 # Run a command string in the hub's shell.
 hub_exec() {
   case "$TRANSPORT" in
-    ssh)   ssh $SSH_OPTS "$HUB_USER@$HUB_HOST" "$1" ;;
-    local) ( export HOME="$HUB_ROOT"; bash -c "$1" ) ;;
+    ssh)   ssh $SSH_OPTS "$HUB_USER@$HUB_HOST" "$1" < /dev/null ;;
+    local) ( export HOME="$HUB_ROOT"; bash -c "$1" < /dev/null ) ;;
     *)     die "unknown TRANSPORT: $TRANSPORT" ;;
   esac
 }
@@ -409,7 +409,8 @@ cmd_publish() {
   [ "${1:-}" = "--as" ] && { as="${2:-}"; shift 2; }
   [ $# -eq 1 ] || die "usage: ymir publish [--as SHARE] <localpath>"
   build_excludes
-  local rb lrel share suffix; rb="$(rsync_bin)"
+  local rb lrel share suffix rpath=(); rb="$(rsync_bin)"
+  [ -n "$HUB_RSYNC_PATH" ] && rpath=(--rsync-path="$HUB_RSYNC_PATH")
   lrel="$(to_rel "$1")"
   if [ -n "$as" ]; then share="$(to_share "$as")"; else share="$lrel"; fi
   [ -e "$HOME/$lrel" ] || die "no such local path: $HOME/$lrel"
@@ -417,8 +418,8 @@ cmd_publish() {
   [ -d "$HOME/$lrel" ] && suffix="/" || suffix=""
   hub_exec "mkdir -p \$HOME/$(dirname "$share")"
   case "$TRANSPORT" in
-    ssh)   "$rb" -a "${REX[@]}" -e "ssh $SSH_OPTS" "$HOME/$lrel$suffix" "$HUB_USER@$HUB_HOST:$share$suffix" ;;
-    local) mkdir -p "$HUB_ROOT/$(dirname "$share")"; "$rb" -a "${REX[@]}" "$HOME/$lrel$suffix" "$HUB_ROOT/$share$suffix" ;;
+    ssh)   "$rb" -a "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" "$HOME/$lrel$suffix" "$HUB_USER@$HUB_HOST:$share$suffix" < /dev/null ;;
+    local) mkdir -p "$HUB_ROOT/$(dirname "$share")"; "$rb" -a "${REX[@]}" "$HOME/$lrel$suffix" "$HUB_ROOT/$share$suffix" < /dev/null ;;
   esac
   hub_exec "mkdir -p \$HOME/.config/ymir; touch $REMOTE_CATALOG; grep -qxF -- '$share' $REMOTE_CATALOG || printf '%s\n' '$share' >> $REMOTE_CATALOG"
   echo "pushed + published: $share"
@@ -456,8 +457,9 @@ cmd_sync() {
     if ! dest_ok "$E_DEST"; then warn "unsafe destination skipped: $E_DEST"; skip=$((skip+1)); continue; fi
     if ! in_catalog "$catalog" "$E_SRC"; then warn "not shared by hub, skipped: $E_SRC"; skip=$((skip+1)); continue; fi
     local isdir suffix delflag=() barg=()
-    isdir="$(hub_exec "test -d \$HOME/$E_SRC && echo 1 || echo 0")"
+    isdir="$(hub_exec "test -d \$HOME/$E_SRC && echo 1 || echo 0" || echo 0)"
     [ "$isdir" = "1" ] && suffix="/" || suffix=""
+    log "sync-entry src=$E_SRC dest=$E_DEST isdir=$isdir suffix=$suffix"
     [ "$MIRROR" = "1" ] && [ "$E_DEST" = "$E_SRC" ] && delflag=(--delete)
     if [ -n "$br" ] && [ -e "$HOME/$E_DEST" ]; then    # back up only an existing dest
       local bdir bpar
@@ -470,12 +472,14 @@ cmd_sync() {
     case "$TRANSPORT" in
       ssh)
         if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
-              "$HUB_USER@$HUB_HOST:$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
-          n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
+              "$HUB_USER@$HUB_HOST:$E_SRC$suffix" "$HOME/$E_DEST$suffix" < /dev/null; then
+          n=$((n+1)); log "sync-ok $E_SRC -> $HOME/$E_DEST$suffix"
+        else local __rc=$?; warn "sync failed: $E_SRC"; fail=$((fail+1)); log "sync-fail $E_SRC rc=$__rc"; fi ;;
       local)
         if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" \
-              "$HUB_ROOT/$E_SRC$suffix" "$HOME/$E_DEST$suffix"; then
-          n=$((n+1)); else warn "sync failed: $E_SRC"; fail=$((fail+1)); fi ;;
+              "$HUB_ROOT/$E_SRC$suffix" "$HOME/$E_DEST$suffix" < /dev/null; then
+          n=$((n+1)); log "sync-ok $E_SRC -> $HOME/$E_DEST$suffix"
+        else local __rc=$?; warn "sync failed: $E_SRC"; fail=$((fail+1)); log "sync-fail $E_SRC rc=$__rc"; fi ;;
     esac
   done <<< "$subs"
   [ -n "$br" ] && prune_backups "$br"

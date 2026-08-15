@@ -189,6 +189,61 @@ t_push() {
   assert_contains "push added to catalog" "$(cat "$(HUB_CAT)")" "starship.toml"
 }
 
+t_push_dir() {
+  setup_case
+  mkdir -p "$SPOKEH/.config/myapp/sub"
+  echo A > "$SPOKEH/.config/myapp/config.yml"
+  echo B > "$SPOKEH/.config/myapp/sub/nested.txt"
+  run spoke publish .config/myapp; assert_rc "publish dir rc" 0 "$RC"
+  assert_file_eq "pushed dir file on hub" "$HUBH/.config/myapp/config.yml" "A"
+  assert_file_eq "pushed nested file on hub" "$HUBH/.config/myapp/sub/nested.txt" "B"
+  assert_contains "publish dir added to catalog" "$(cat "$(HUB_CAT)")" ".config/myapp"
+  # subscribe on a spoke and pull it back down (same-path directory round trip)
+  run spoke sub .config/myapp; assert_rc "sub dir rc" 0 "$RC"
+  rm -rf "$SPOKEH/.config/myapp"
+  run spoke sync; assert_rc "sync dir rc" 0 "$RC"
+  assert_file_eq "dir pulled back" "$SPOKEH/.config/myapp/config.yml" "A"
+  assert_file_eq "nested pulled back" "$SPOKEH/.config/myapp/sub/nested.txt" "B"
+}
+
+# Regression: `ssh` inside the sync loop used to inherit the loop's stdin (the
+# `<<< "$subs"` herestring) and consume the remaining subscription lines, so only
+# the first subscription synced. hub_exec/rsync must redirect stdin from /dev/null.
+t_sync_ssh_stdin_safe() {
+  setup_case
+  # Fake ssh that, like real ssh, drains stdin before running the remote command.
+  cat > "$CASE_DIR/ssh" <<'EOF'
+#!/bin/bash
+# Reconstruct the remote command:
+#  - hub_exec style:  ssh -o ... user@host "command"  -> command is the last arg
+#  - rsync -e style:  ssh -o ... -l user host rsync --server ... -> from 'rsync' on
+remote=""; found=0
+for a in "$@"; do
+  if [ "$a" = "rsync" ]; then found=1; remote="$a"; continue; fi
+  [ "$found" = "1" ] && remote="$remote $a"
+done
+[ "$found" = "0" ] && remote="${!#}"
+case "$remote" in
+  rsync\ *) : ;;                     # protocol rides stdin/stdout: leave it
+  *) cat >/dev/null 2>/dev/null ;;    # hub_exec style: drain stdin like ssh
+esac
+export HOME="${FAKE_HUB_HOME:-$HOME}"
+export PATH="/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+cd "$HOME"
+exec bash -c "$remote"
+EOF
+  chmod +x "$CASE_DIR/ssh"
+  printf 'IS_HUB="0"\nTRANSPORT="ssh"\nHUB_HOST="fakehub"\nHUB_USER="fakeuser"\nBACKUP="0"\n' > "$SPOKEH/.config/ymir/config"
+  echo A > "$HUBH/a"; echo B > "$HUBH/b"; echo C > "$HUBH/c"
+  must hub pub a b c
+  spoke_ssh() { ( cd "$SPOKEH" && HOME="$SPOKEH" YMIR_CFG_DIR="$SPOKEH/.config/ymir" FAKE_HUB_HOME="$HUBH" PATH="$CASE_DIR:$PATH" bash "$YMIR" "$@" ); }
+  must spoke_ssh sub --all
+  run spoke_ssh sync; assert_rc "ssh stdin-safe sync rc" 0 "$RC"
+  assert_file_eq "all three synced (a)" "$SPOKEH/a" "A"
+  assert_file_eq "all three synced (b)" "$SPOKEH/b" "B"
+  assert_file_eq "all three synced (c)" "$SPOKEH/c" "C"
+}
+
 t_alias_add_hub() {   # `add` on the hub == pub
   setup_case; echo A > "$HUBH/.a"
   run hub add .a; assert_rc "add-on-hub rc" 0 "$RC"
@@ -221,7 +276,8 @@ t_role_sub_on_hub() {
 for t in t_pub_secret_pubs t_sub_plain t_sub_map t_sub_all t_sub_unsafe_dest \
          t_sub_mix_guard t_sync_plain t_sync_map t_sync_dir t_sync_gate \
          t_mirror_remap_safe t_mirror_samepath_delete t_sync_excludes_volatile \
-         t_sync_backup t_sync_backup_off t_unsub_src_only t_push \
+         t_sync_backup t_sync_backup_off t_unsub_src_only t_push t_push_dir \
+         t_sync_ssh_stdin_safe \
          t_alias_add_hub t_alias_add_spoke t_role_pub_on_spoke t_role_sub_on_hub; do
   if ! "$t"; then FAILS=$((FAILS+1)); printf 'not ok - %s (test function crashed)\n' "$t"; fi
   teardown_case
