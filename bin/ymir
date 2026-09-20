@@ -46,6 +46,7 @@ SECRET_PATTERNS=(
 # WAL/SHM sidecars corrupts the copy -> "disk I/O error"). Excluded from every transfer.
 VOLATILE_PATTERNS=(
   "*-wal" "*-shm" "*.db-journal" "*.sqlite-journal" "*.sqlite-wal" "*.sqlite-shm" "*.lock"
+  ".git/worktrees"
 )
 
 REMOTE_CATALOG='$HOME/.config/ymir/shares.list'   # expanded on the hub
@@ -460,6 +461,18 @@ cmd_sync() {
     isdir="$(hub_exec "test -d \$HOME/$E_SRC && echo 1 || echo 0" || echo 0)"
     [ "$isdir" = "1" ] && suffix="/" || suffix=""
     log "sync-entry src=$E_SRC dest=$E_DEST isdir=$isdir suffix=$suffix"
+    local iexcl=() h_ign=""
+    if [ "$isdir" = "1" ]; then
+      if [ -f "$HOME/$E_DEST/.ymirignore" ]; then
+        iexcl+=(--exclude-from="$HOME/$E_DEST/.ymirignore" --exclude=".ymirignore")
+      elif hub_exec "test -f \$HOME/$E_SRC/.ymirignore" >/dev/null 2>&1; then
+        # Spoke does not have a local .ymirignore yet; fetch hub's .ymirignore to apply it immediately
+        h_ign="$(mktemp 2>/dev/null || mktemp -t ymir)"
+        if hub_exec "cat \$HOME/$E_SRC/.ymirignore" > "$h_ign" 2>/dev/null && [ -s "$h_ign" ]; then
+          iexcl+=(--exclude-from="$h_ign")
+        fi
+      fi
+    fi
     [ "$MIRROR" = "1" ] && [ "$E_DEST" = "$E_SRC" ] && delflag=(--delete)
     if [ -n "$br" ] && [ -e "$HOME/$E_DEST" ]; then    # back up only an existing dest
       local bdir bpar
@@ -471,16 +484,17 @@ cmd_sync() {
     mkdir -p "$HOME/$(dirname "$E_DEST")"
     case "$TRANSPORT" in
       ssh)
-        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" ${iexcl[@]+"${iexcl[@]}"} ${rpath[@]+"${rpath[@]}"} -e "ssh $SSH_OPTS" \
               "$HUB_USER@$HUB_HOST:$E_SRC$suffix" "$HOME/$E_DEST$suffix" < /dev/null; then
           n=$((n+1)); log "sync-ok $E_SRC -> $HOME/$E_DEST$suffix"
         else local __rc=$?; warn "sync failed: $E_SRC"; fail=$((fail+1)); log "sync-fail $E_SRC rc=$__rc"; fi ;;
       local)
-        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" \
+        if "$rb" -a ${delflag[@]+"${delflag[@]}"} ${barg[@]+"${barg[@]}"} "${REX[@]}" ${iexcl[@]+"${iexcl[@]}"} \
               "$HUB_ROOT/$E_SRC$suffix" "$HOME/$E_DEST$suffix" < /dev/null; then
           n=$((n+1)); log "sync-ok $E_SRC -> $HOME/$E_DEST$suffix"
         else local __rc=$?; warn "sync failed: $E_SRC"; fail=$((fail+1)); log "sync-fail $E_SRC rc=$__rc"; fi ;;
     esac
+    [ -n "$h_ign" ] && rm -f "$h_ign"
   done <<< "$subs"
   [ -n "$br" ] && prune_backups "$br"
   date '+%Y-%m-%dT%H:%M:%S' > "$STATE_FILE"

@@ -78,6 +78,8 @@ publishes it in one step.
   like `~/.config`.
 - Secret patterns (`.ssh/*`, `id_rsa`, `*.pem`, `*.key`, `.aws/credentials`, `.env`, ...)
   are excluded from every transfer and blocked by `pub`/`push` without `--force`.
+- Per-directory ignores: create a `.ymirignore` inside any subscribed directory to exclude
+  specific files or patterns from `sync`. A spoke-local `.ymirignore` takes precedence.
 - Every `sync` backs up files it overwrites/deletes into
   `~/.config/ymir/backups/<timestamp>/` (kept: `KEEP_BACKUPS`, default 10). To recover,
   copy the file back from there. Set `BACKUP="0"` to disable.

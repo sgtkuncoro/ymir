@@ -148,11 +148,14 @@ t_sync_excludes_volatile() {
   echo DB  > "$HUBH/dbdir/app.db"
   echo WAL > "$HUBH/dbdir/app.db-wal"
   echo SHM > "$HUBH/dbdir/app.db-shm"
+  mkdir -p "$HUBH/dbdir/.git/worktrees/wt1"
+  echo WT  > "$HUBH/dbdir/.git/worktrees/wt1/gitdir"
   must hub pub dbdir; must spoke sub dbdir
   run spoke sync; assert_rc "sync volatile rc" 0 "$RC"
   assert_file_eq "db copied" "$SPOKEH/dbdir/app.db" "DB"
   assert_absent "wal sidecar excluded" "$SPOKEH/dbdir/app.db-wal"
   assert_absent "shm sidecar excluded" "$SPOKEH/dbdir/app.db-shm"
+  assert_absent "git worktrees excluded" "$SPOKEH/dbdir/.git/worktrees"
 }
 
 t_sync_backup() {
@@ -243,6 +246,32 @@ EOF
   assert_file_eq "all three synced (b)" "$SPOKEH/b" "B"
   assert_file_eq "all three synced (c)" "$SPOKEH/c" "C"
 }
+t_sync_dir_ymirignore_spoke() {
+  setup_case
+  mkdir -p "$HUBH/myproj" "$SPOKEH/myproj"
+  echo KEEP > "$HUBH/myproj/keep.txt"
+  echo IGNORE > "$HUBH/myproj/ignore.txt"
+  echo "ignore.txt" > "$SPOKEH/myproj/.ymirignore"
+  must hub pub myproj; must spoke sub myproj
+  run spoke sync; assert_rc "sync ymirignore spoke rc" 0 "$RC"
+  assert_file_eq "non-ignored file synced" "$SPOKEH/myproj/keep.txt" "KEEP"
+  assert_absent "spoke ignored file not synced" "$SPOKEH/myproj/ignore.txt"
+  assert_file_eq "spoke .ymirignore preserved" "$SPOKEH/myproj/.ymirignore" "ignore.txt"
+}
+
+t_sync_dir_ymirignore_hub_fallback() {
+  setup_case
+  mkdir -p "$HUBH/myproj"
+  echo KEEP > "$HUBH/myproj/keep.txt"
+  echo IGNORE > "$HUBH/myproj/ignore.txt"
+  echo "ignore.txt" > "$HUBH/myproj/.ymirignore"
+  must hub pub myproj; must spoke sub myproj
+  run spoke sync; assert_rc "sync ymirignore hub fallback rc" 0 "$RC"
+  assert_file_eq "non-ignored file synced" "$SPOKEH/myproj/keep.txt" "KEEP"
+  assert_absent "hub ignored file not synced" "$SPOKEH/myproj/ignore.txt"
+  assert_file_eq "hub .ymirignore received" "$SPOKEH/myproj/.ymirignore" "ignore.txt"
+}
+
 
 t_alias_add_hub() {   # `add` on the hub == pub
   setup_case; echo A > "$HUBH/.a"
@@ -278,7 +307,8 @@ for t in t_pub_secret_pubs t_sub_plain t_sub_map t_sub_all t_sub_unsafe_dest \
          t_mirror_remap_safe t_mirror_samepath_delete t_sync_excludes_volatile \
          t_sync_backup t_sync_backup_off t_unsub_src_only t_push t_push_dir \
          t_sync_ssh_stdin_safe \
-         t_alias_add_hub t_alias_add_spoke t_role_pub_on_spoke t_role_sub_on_hub; do
+         t_alias_add_hub t_alias_add_spoke t_role_pub_on_spoke t_role_sub_on_hub \
+         t_sync_dir_ymirignore_spoke t_sync_dir_ymirignore_hub_fallback; do
   if ! "$t"; then FAILS=$((FAILS+1)); printf 'not ok - %s (test function crashed)\n' "$t"; fi
   teardown_case
 done

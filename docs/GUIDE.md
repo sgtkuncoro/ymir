@@ -240,6 +240,9 @@ ymir uninstall-agent
 - **Secret guard**: `.ssh/*  id_rsa  id_ed25519  *.pem  *.key  *.p12  *.pfx
   *.keychain*  .aws/credentials  .gnupg/*  .netrc  *.env  .env` are excluded from every
   transfer and blocked by `pub`/`push` without `--force`.
+- **Per-directory ignore (`.ymirignore`)**: if a subscribed directory contains a `.ymirignore`,
+  its patterns are excluded during `sync`. A spoke-local `.ymirignore` takes precedence; if absent,
+  the hub's `.ymirignore` is fetched and applied.
 
 ## 11. Troubleshooting
 
